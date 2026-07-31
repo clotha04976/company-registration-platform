@@ -1,129 +1,87 @@
 "use client";
 
-import { ChangeEvent, DragEvent, KeyboardEvent, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, ChevronRight, CircleHelp, Download, FileCheck2, FileText, LockKeyhole, Plus, ShieldCheck, Trash2, UploadCloud, UserRound } from "lucide-react";
+import { ChangeEvent, DragEvent, useRef, useState } from "react";
+import { AlertTriangle, ArrowLeft, ArrowRight, Check, Download, Eye, FileText, Trash2, UploadCloud } from "lucide-react";
+import CasesDashboard from "./cases-dashboard";
 
-type FileStatus = "waiting" | "processing" | "success" | "manual";
-type PreviewKey = "aml" | "shareholder" | "director";
-type UploadItem = { id: string; file: File; status: FileStatus; progress: number; note?: string };
-type BusinessItem = { id: string; code: string; name: string };
-type OutputKey = "company_application" | "registration_form" | "name_reservation" | "articles" | "shareholder" | "director" | "aml" | "id_attachment" | "building_consent" | "house_tax" | "land_title" | "capital_certificate" | "registration_card_city" | "registration_card_return";
+type SlotKey = "name_reservation" | "identity" | "land_title" | "house_tax" | "passbook" | "building_consent" | "lease" | "floor_plan" | "other";
+type Slot = { key: SlotKey; phase: string; title: string; purpose: string; required: boolean; multiple?: boolean; reuse?: string };
+type SlotFiles = Record<SlotKey, File[]>;
+type LinkTarget = "land_title" | "building_consent" | "floor_plan";
+type SourceLink = { sourceSlot: "lease"; targetSlot: LinkTarget; sourceFileName: string; pageRange: string; status: "suggested" | "confirmed" | "dismissed"; confidence: "較高" | "低" };
+type OutputKey = "company_application" | "registration_form" | "registration_card_city" | "registration_card_return" | "articles" | "shareholder" | "director" | "aml" | SlotKey;
 
-const initialBusiness: BusinessItem[] = [
-  { id: "1", code: "E599010", name: "配管工程業" }, { id: "2", code: "E601010", name: "電器承裝業" },
-  { id: "3", code: "E603050", name: "自動控制設備工程業" }, { id: "4", code: "E603090", name: "照明設備安裝工程業" },
-  { id: "5", code: "IG03010", name: "能源技術服務業" }, { id: "6", code: "ZZ99999", name: "除許可業務外，得經營法令非禁止或限制之業務" },
+const slots: Slot[] = [
+  { key: "name_reservation", phase: "名稱預查", title: "名稱預查核定書", purpose: "核對公司名稱與預查編號", required: true },
+  { key: "identity", phase: "市政府設立", title: "身分證正反面", purpose: "確認負責人身分", required: true, multiple: true, reuse: "後續防洗錢文件將沿用" },
+  { key: "land_title", phase: "市政府設立", title: "土地權狀", purpose: "確認設立地址權利關係", required: true },
+  { key: "house_tax", phase: "市政府設立", title: "房屋稅單", purpose: "核對建物資料", required: true, reuse: "後續將沿用" },
+  { key: "passbook", phase: "市政府設立", title: "籌備處存摺", purpose: "核對資本額存入資料", required: true },
+  { key: "building_consent", phase: "市政府設立", title: "建物所有人同意書", purpose: "確認地址使用同意", required: false, reuse: "後續將沿用" },
+  { key: "lease", phase: "國稅局接續", title: "租約", purpose: "供國稅局營業地址審核", required: true },
+  { key: "floor_plan", phase: "國稅局接續", title: "商辦平面圖", purpose: "說明營業空間配置", required: false },
+  { key: "other", phase: "國稅局接續", title: "其他文件", purpose: "補充審核所需資料", required: false },
 ];
+const emptyFiles = (): SlotFiles => Object.fromEntries(slots.map((slot) => [slot.key, []])) as unknown as SlotFiles;
+const initialForm = { company: "範例工程有限公司", representative: "王小明", nationalId: "A123456789", precheck: "115004506", approval: "115/01/22", expiry: "115/07/21", contactAddress: "臺北市中正區範例路1號", registrationAddress: "", capital: "1,000,000" };
+const initialBusiness = ["E599010 配管工程業", "E601010 電器承裝業", "E603050 自動控制設備工程業", "E603090 照明設備安裝工程業", "IG03010 能源技術服務業", "ZZ99999 除許可業務外，得經營法令非禁止或限制之業務"];
+const allowed = new Set(["pdf", "jpg", "jpeg", "png", "doc", "docx"]);
+const bytes = (value: number) => value < 1024 * 1024 ? `${Math.max(1, Math.round(value / 1024))} KB` : `${(value / 1024 / 1024).toFixed(1)} MB`;
+const ext = (file: File) => file.name.split(".").pop()?.toLowerCase() ?? "";
+const supported = (file: File) => allowed.has(ext(file));
+export const xmlEscape = (value: string) => value.replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[char]!);
+const p = (line: string, bold = false) => `<w:p><w:r>${bold ? "<w:rPr><w:b/></w:rPr>" : ""}<w:t xml:space="preserve">${xmlEscape(line)}</w:t></w:r></w:p>`;
+export const wordXml = (title: string, lines: string[]) => `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><?mso-application progid="Word.Document"?><w:wordDocument xmlns:w="http://schemas.microsoft.com/office/word/2003/wordml"><w:fonts><w:defaultFonts w:ascii="DFKai-SB" w:h-ansi="DFKai-SB" w:fareast="標楷體"/></w:fonts><w:styles><w:style w:type="paragraph" w:default="on" w:styleId="Normal"><w:rPr><w:rFonts w:ascii="DFKai-SB" w:h-ansi="DFKai-SB" w:fareast="標楷體"/></w:rPr></w:style></w:styles><w:body>${p(title, true)}${lines.map(line => p(line)).join("")}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:wordDocument>`;
+export const downloadXml = (name: string, xml: string) => downloadBlob(new Blob([xml], { type: "application/xml;charset=utf-8" }), `${name}.xml`);
+const downloadBlob = (blob: Blob, name: string) => { const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = name; a.click(); window.setTimeout(() => URL.revokeObjectURL(url), 0); };
+const downloadOriginalFile = (file: File) => downloadBlob(file, file.name);
 
-const outputList: { key: OutputKey; label: string; kind: "form" | "attachment" | "external" }[] = [
-  { key: "company_application", label: "公司設立登記申請書", kind: "form" }, { key: "registration_form", label: "公司設立登記表", kind: "form" },
-  { key: "name_reservation", label: "公司名稱及所營事業預查核定書", kind: "form" }, { key: "articles", label: "公司章程", kind: "form" },
-  { key: "shareholder", label: "股東同意書", kind: "form" }, { key: "director", label: "董事願任同意書", kind: "form" },
-  { key: "aml", label: "AML 防制洗錢確認書", kind: "form" }, { key: "id_attachment", label: "身分證明文件附件", kind: "attachment" },
-  { key: "building_consent", label: "建物所有人同意書", kind: "external" }, { key: "house_tax", label: "房屋稅單", kind: "external" },
-  { key: "land_title", label: "土地權狀", kind: "external" }, { key: "capital_certificate", label: "會計師資本額簽證", kind: "external" },
-  { key: "registration_card_city", label: "登記事項卡（市政府留存）", kind: "external" }, { key: "registration_card_return", label: "登記事項卡（蓋章後寄回客戶）", kind: "external" },
+const outputLabels: { key: OutputKey; label: string }[] = [
+  { key: "company_application", label: "公司設立登記申請書" }, { key: "registration_form", label: "公司設立登記表" }, { key: "registration_card_city", label: "登記事項卡（市政府留存）" }, { key: "registration_card_return", label: "登記事項卡（蓋章寄回客戶）" }, { key: "articles", label: "公司章程" }, { key: "shareholder", label: "股東同意書" }, { key: "director", label: "董事願任同意書" }, { key: "aml", label: "防制洗錢確認書" },
+  ...slots.map(slot => ({ key: slot.key as OutputKey, label: `${slot.title}（原始附件）` })),
 ];
-
-const supportedExtensions = new Set(["pdf", "jpg", "jpeg", "png", "webp"]);
-const knownFileWords = ["預查", "身分證", "章程", "股東同意", "董事願任", "防制洗錢", "房屋稅", "建物所有人", "土地權狀", "資本額", "會計師", "登記表", "申請書"];
-const formatBytes = (value: number) => value < 1024 * 1024 ? `${Math.max(1, Math.round(value / 1024))} KB` : `${(value / 1024 / 1024).toFixed(1)} MB`;
-const downloadText = (fileName: string, content: string) => {
-  const blob = new Blob(["\ufeff", content], { type: "text/plain;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url; link.download = `${fileName}.txt`; document.body.appendChild(link); link.click(); link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 0);
-};
-function DateNotice({ capitalDate = false }: { capitalDate?: boolean }) {
-  return <div className="date-notice"><CircleHelp size={16}/>{capitalDate ? "日期為存入資本額日期，請先留空" : "日期可填寫簽名當天日期"}</div>;
-}
-
-function Preview({ tab, company, representative, nationalId, contactAddress }: { tab: PreviewKey; company: string; representative: string; nationalId: string; contactAddress: string }) {
-  if (tab === "aml") return <article className="paper"><div className="paper-label"><ShieldCheck size={16}/>防制洗錢確認書</div><h2>防制洗錢確認書</h2><p>茲就資本簽證事宜，依會計師防制洗錢辦法之規定，敘明下列之情事以供會計師使用。</p><h3>一、基本資料</h3><p>姓名：{representative}　身分證字號：{nationalId}</p><p>地址：{contactAddress}</p><h3>二、重要政治性職務人士</h3><p>□否　□是，請說明：＿＿＿＿＿＿＿＿</p><h3>三、合法資金來源</h3><p>□繼承財產　□商業經營獲利　□出售不動產　□薪資　□其他</p><p className="paper-sign">立書人：＿＿＿＿＿＿＿＿（親簽）<br/>日期：＿＿年＿＿月＿＿日</p><DateNotice /></article>;
-  if (tab === "shareholder") return <article className="paper consent-paper"><div className="paper-label"><FileText size={16}/>股東同意書</div><h2>{company}<br/>股東同意書</h2><table><thead><tr><th>申請事項</th><th>同意內容</th></tr></thead><tbody><tr><td>公司設立</td><td>茲同意設立{company}，訂定公司章程，並選任{representative}為董事。</td></tr></tbody></table><div className="seal-space"><span>公司大章空位</span><small>（加蓋公司印章）</small></div><table><thead><tr><th>股東姓名</th><th>親自簽名</th></tr></thead><tbody><tr><td>{representative}</td><td></td></tr></tbody></table><p className="paper-date">日期：＿＿年＿＿月＿＿日</p><DateNotice capitalDate /></article>;
-  return <article className="paper director-paper"><div className="paper-label"><UserRound size={16}/>董事願任同意書</div><h2>董事願任同意書</h2><p className="director-text">本人同意擔任{company}董事。</p><p className="signature-place">（本人親自簽名）</p><p className="director-name">立同意書人：{representative}</p><p className="paper-date director-date">日期：＿＿年＿＿月＿＿日</p><p className="paper-footnote">有限公司之董事，依公司法第八條第一項規定為公司之負責人。</p><DateNotice capitalDate /></article>;
-}
 
 export default function Home() {
-  const [step, setStep] = useState(1);
-  const [files, setFiles] = useState<UploadItem[]>([]);
-  const [recognitionDone, setRecognitionDone] = useState(false);
-  const [recognising, setRecognising] = useState(false);
-  const [preview, setPreview] = useState<PreviewKey>("aml");
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [form, setForm] = useState({ company: "範例工程有限公司", representative: "王小明", precheck: "115004506", approval: "115/01/22", expiry: "115/07/21", capital: "1,000,000", nationalId: "A1••••••734", contactAddress: "桃園市桃園區（完整地址待確認）", registrationAddress: "臺中市南區（完整地址待確認）" });
-  const [business, setBusiness] = useState<BusinessItem[]>(initialBusiness);
-  const [saved, setSaved] = useState(false);
-
-  const formIssues = useMemo(() => {
-    const labels: Record<keyof typeof form, string> = { company: "公司名稱", representative: "負責人姓名", precheck: "預查編號", approval: "核准日期", expiry: "核准有效期限", capital: "資本總額", nationalId: "身分證字號", contactAddress: "負責人聯絡地址", registrationAddress: "公司登記地址" };
-    const missing = (Object.keys(form) as (keyof typeof form)[]).filter((key) => !form[key].trim()).map((key) => labels[key]);
-    if (business.some((item) => !item.code.trim() || !item.name.trim())) missing.push("所營事業資料");
-    return missing;
-  }, [business, form]);
-  const manualFiles = files.filter((item) => item.status === "manual");
-  const successFiles = files.filter((item) => item.status === "success");
-  const formComplete = formIssues.length === 0;
-  const hasFile = (...words: string[]) => successFiles.some((item) => words.some((word) => item.file.name.includes(word)));
-  const outputState = (item: typeof outputList[number]) => {
-    if (item.key === "company_application") return formComplete ? { ready: true, reason: "共用資料完整，可下載草稿" } : { ready: false, reason: `待補：${formIssues.join("、")}` };
-    if (item.key === "registration_form") return formComplete ? { ready: true, reason: "登記資料完整，可下載草稿" } : { ready: false, reason: `待補：${formIssues.join("、")}` };
-    if (item.key === "name_reservation") return form.precheck.trim() ? { ready: true, reason: "已有預查編號與核准資料" } : { ready: false, reason: "待補：預查資料" };
-    if (item.key === "articles") return form.company.trim() && form.capital.trim() && business.length ? { ready: true, reason: "章程所需資料完整" } : { ready: false, reason: "待補：公司名稱、資本額或營業項目" };
-    if (item.key === "shareholder" || item.key === "director") return form.company.trim() && form.representative.trim() ? { ready: true, reason: "公司名稱與負責人已確認" } : { ready: false, reason: "待補：公司名稱或負責人" };
-    if (item.key === "aml") return form.representative.trim() && form.nationalId.trim() && form.contactAddress.trim() ? { ready: true, reason: "負責人基本資料已確認" } : { ready: false, reason: "待補：負責人基本資料" };
-    if (item.key === "id_attachment") return hasFile("身分證") ? { ready: true, reason: "已收到身分證附件" } : { ready: false, reason: "待補：負責人身分證附件" };
-    if (item.key === "building_consent") return hasFile("建物所有人") ? { ready: true, reason: "已收到建物所有人同意書" } : { ready: false, reason: "待補：建物所有人同意書" };
-    if (item.key === "house_tax") return hasFile("房屋稅") ? { ready: true, reason: "已收到房屋稅單" } : { ready: false, reason: "待補：房屋稅單" };
-    if (item.key === "land_title") return hasFile("土地權狀") ? { ready: true, reason: "已收到土地權狀" } : { ready: false, reason: "待補：土地權狀" };
-    if (item.key === "capital_certificate") return hasFile("資本額簽證", "會計師") ? { ready: true, reason: "已收到會計師資本額簽證" } : { ready: false, reason: "待補：會計師資本額簽證" };
-    return { ready: false, reason: "市政府送件後才會取得或完成" };
+  const [view, setView] = useState<"dashboard" | "wizard">("dashboard"); const [step, setStep] = useState(1);
+  const [files, setFiles] = useState<SlotFiles>(emptyFiles); const [links, setLinks] = useState<SourceLink[]>([]); const [recognising, setRecognising] = useState(false); const [recognitionDone, setRecognitionDone] = useState(false);
+  const refs = useRef<Record<SlotKey, HTMLInputElement | null>>({} as Record<SlotKey, HTMLInputElement | null>);
+  const [form, setForm] = useState(initialForm);
+  const [business, setBusiness] = useState(initialBusiness);
+  const linkFor = (key: SlotKey) => links.find(link => link.targetSlot === key && link.status === "confirmed");
+  const validFiles = (key: SlotKey) => files[key].filter(supported);
+  const received = (key: SlotKey) => validFiles(key).length > 0 || Boolean(linkFor(key));
+  const requiredMissing = slots.filter(slot => slot.required && !received(slot.key));
+  const canStart = validFiles("name_reservation").length > 0 && validFiles("identity").length > 0;
+  const addFiles = (key: SlotKey, incoming: FileList | null) => { if (!incoming?.length) return; const slot = slots.find(item => item.key === key)!; const chosen = Array.from(incoming); setFiles(current => ({ ...current, [key]: slot.multiple ? chosen.slice(0, 2) : chosen.slice(0, 1) })); setRecognitionDone(false); };
+  const drop = (event: DragEvent<HTMLDivElement>, key: SlotKey) => { event.preventDefault(); addFiles(key, event.dataTransfer.files); };
+  const remove = (key: SlotKey, index: number) => setFiles(current => ({ ...current, [key]: current[key].filter((_, i) => i !== index) }));
+  const previewFile = (file: File) => { const url = URL.createObjectURL(file); window.open(url, "_blank", "noopener"); window.setTimeout(() => URL.revokeObjectURL(url), 60_000); };
+  const makeSuggestions = () => { const lease = files.lease[0]; if (!lease || ext(lease) !== "pdf") return; const high = /權狀|同意書|平面圖|合併|多頁/.test(lease.name); setLinks(current => ["land_title", "building_consent", "floor_plan"].map(targetSlot => current.find(link => link.targetSlot === targetSlot) ?? ({ sourceSlot: "lease", targetSlot: targetSlot as LinkTarget, sourceFileName: lease.name, pageRange: "待確認", status: "suggested", confidence: high ? "較高" : "低" })));
   };
-  const outputStates = outputList.map((item) => ({ ...item, ...outputState(item) }));
-  const readyCount = outputStates.filter((item) => item.ready).length;
-
-  const addFiles = (incoming: FileList | null) => {
-    if (!incoming?.length) return;
-    const next = Array.from(incoming).map((file) => ({ id: `${file.name}-${file.lastModified}-${Math.random()}`, file, status: "waiting" as FileStatus, progress: 0 }));
-    setFiles((current) => [...current, ...next]); setRecognitionDone(false); setSaved(false);
+  const startRecognition = () => { if (!canStart || recognising) return; setRecognising(true); setRecognitionDone(false); window.setTimeout(() => { setRecognising(false); setRecognitionDone(true); makeSuggestions(); }, 600); };
+  const updateLink = (target: LinkTarget, patch: Partial<SourceLink>) => setLinks(current => current.map(link => link.targetSlot === target ? { ...link, ...patch } : link));
+  const sourceFile = (key: SlotKey) => validFiles(key)[0] ?? (linkFor(key) ? validFiles("lease")[0] : undefined);
+  const formComplete = Object.values(form).every(value => Boolean(value) && value !== "待補") && business.length === 6 && business.every(Boolean);
+  const articleLines = [
+    `第一條　本公司依照公司法規定組織之定名為${form.company}。`, `第二條　本公司所營事業如下：`, ...business.map((item, i) => `${i + 1}. ${item}`), `第三條　本公司所在地設於台中市，必要時得在國內外設立分公司。`, `第四條　本公司之公告方法依照公司法第廿八條規定辦理。`, `第五條　本公司資本總額定為新台幣${form.capital}元整，全額繳足，各股東姓名、出資額如下：${form.representative}｜${form.capital}元整。`, "第五條之一　本公司為業務需要得對外保證。", "第六條　股東非得其他股東表決權過半數之同意，不得以其出資之全部或一部，轉讓於他人。董事非得其他股東表決權三分之二以上之同意，不得以其出資之全部或一部，轉讓於他人。", "第七條　本公司股東每出資新台幣壹仟元，有一表決權。", "第八條　本公司重要事項除公司法另有規定外經全體股東同意行之。", "第九條　本公司置董事一人執行業務並對外代表公司。", "第十條　本公司得設經理人，其委任、解任及報酬，依照公司法第廿九條規定辦理。", "第十一條　本公司每會計年度終了，董事應編造：(一)營業報告書、(二)財務報表、(三)盈餘分派或虧損撥補之議案送請各股東承認。", "第十二條　董事之報酬得於章程內訂明或依特約另定之。", "第十三條　公司年度如有獲利，應提撥新台幣壹仟元為員工酬勞。但公司尚有累積虧損時，應預先保留彌補數額。", "第十四條　本公司之盈餘及虧損按照各股東出資比例分派之。公司年度總決算如有盈餘，應先提繳稅款，彌補累積虧損，次提10%為法定盈餘公積，但法定盈餘公積金已達資本總額時，不在此限。其餘除派付股息外，如尚有盈餘，再由股東同意分配股東紅利。", "第十五條　本章程未盡事宜悉依照公司法及有關法令之規定辦理。", "第十六條　本章程訂立於民國＿＿年＿＿月＿＿日。", `公司名稱：${form.company}`, `董事：${form.representative}`
+  ];
+  const doc = (key: OutputKey): [string, string[]] => key === "articles" ? [`${form.company}章程`, articleLines] : key === "shareholder" ? [`${form.company}股東同意書`, [`茲同意設立${form.company}，訂定公司章程，並選任${form.representative}為董事。`, `股東姓名：${form.representative}`, "公司大章：＿＿＿＿＿＿＿＿", "＿＿＿＿＿＿＿＿", "＿＿＿＿＿＿＿＿", "＿＿＿＿＿＿＿＿", "＿＿＿＿＿＿＿＿", "日期：民國＿＿年＿＿月＿＿日", "提醒：日期為存入資本額日期，請先留空"]] : key === "director" ? ["董事願任同意書", [`本人同意擔任${form.company}董事。`, `立同意書人：${form.representative}`, "親簽：＿＿＿＿＿＿＿＿", "日期：民國＿＿年＿＿月＿＿日", "提醒：日期為存入資本額日期，請先留空"]] : ["防制洗錢確認書", [`姓名：${form.representative}`, `身分證字號：${form.nationalId}`, `地址：${form.contactAddress}`, "職業：＿＿＿＿＿＿＿＿　電話：＿＿＿＿＿＿＿＿　Email：＿＿＿＿＿＿＿＿", "是否為 PEP：＿＿＿＿＿＿＿＿　資金來源：＿＿＿＿＿＿＿＿", "證明文件：＿＿＿＿＿＿＿＿", "身分證正反面附件：已由 Step 1 上傳文件沿用。", "親簽：＿＿＿＿＿＿＿＿", "日期：民國＿＿年＿＿月＿＿日", "提醒：日期可填寫簽名當天日期"]];
+  const output = (key: OutputKey) => {
+    if (slots.some(slot => slot.key === key)) { const keySlot = key as SlotKey; const originals = validFiles(keySlot); if (originals.length) originals.forEach(downloadOriginalFile); else { const file = sourceFile(keySlot); if (file) downloadOriginalFile(file); } return; }
+    const [name, lines] = doc(key); downloadXml(name, wordXml(name, lines));
   };
-  const handleDrop = (event: DragEvent<HTMLDivElement>) => { event.preventDefault(); addFiles(event.dataTransfer.files); };
-  const keyUpload = (event: KeyboardEvent<HTMLDivElement>) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); inputRef.current?.click(); } };
-  const startRecognition = () => {
-    if (!files.length || recognising) return;
-    setRecognising(true); setRecognitionDone(false);
-    setFiles((current) => current.map((item) => ({ ...item, status: "processing", progress: 8, note: undefined })));
-    files.forEach((item, index) => {
-      window.setTimeout(() => {
-        const extension = item.file.name.split(".").pop()?.toLowerCase() ?? "";
-        const success = supportedExtensions.has(extension) && knownFileWords.some((word) => item.file.name.includes(word));
-        setFiles((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: success ? "success" : "manual", progress: 100, note: success ? "已完成資料擷取，請核對欄位" : "未知檔案格式，需人工確認；未套用 OCR 結果" } : entry));
-        if (index === files.length - 1) { setRecognising(false); setRecognitionDone(true); }
-      }, 650 * (index + 1));
-    });
+  const outputState = (key: OutputKey) => {
+    if (["company_application", "registration_form", "registration_card_city", "registration_card_return"].includes(key)) return { ready: false, reason: "待提供正式範本" };
+    if (slots.some(slot => slot.key === key)) { const slot = slots.find(item => item.key === key)!; const keySlot = key as SlotKey; const link = linkFor(keySlot); const count = validFiles(keySlot).length; return sourceFile(keySlot) ? { ready: true, reason: link ? `包含於租約：${link.sourceFileName}（第 ${link.pageRange} 頁）` : count > 1 ? `可下載 ${count} 份原始附件` : "可下載原始附件" } : { ready: false, reason: slot.required ? "待補" : "尚未提供" }; }
+    if (key === "articles") return { ready: formComplete, reason: formComplete ? "可產出 Word XML" : "待補公司基本資料" };
+    if (key === "aml") return { ready: Boolean(form.representative && form.nationalId && form.contactAddress), reason: "待補負責人、身分證或地址" };
+    return { ready: Boolean(form.company && form.representative && form.capital), reason: "待補公司、股東或出資資料" };
   };
-  const updateForm = (key: keyof typeof form, value: string) => { setForm((current) => ({ ...current, [key]: value })); setSaved(false); };
-  const changeBusiness = (id: string, key: "code" | "name", value: string) => { setBusiness((current) => current.map((item) => item.id === id ? { ...item, [key]: value } : item)); setSaved(false); };
-  const saveStepTwo = () => { setSaved(true); setStep(3); };
-  const genericContent = useMemo(() => `公司設立登記文件草稿\n\n公司名稱：${form.company}\n負責人：${form.representative}\n預查編號：${form.precheck}\n核准日期：${form.approval}\n核准有效期限：${form.expiry}\n資本總額：${form.capital}\n負責人聯絡地址：${form.contactAddress}\n公司登記地址：${form.registrationAddress}\n\n所營事業\n${business.map((item) => `${item.code} ${item.name}`).join("\n")}`, [business, form]);
-  const getContent = (key: OutputKey) => {
-    if (key === "aml") return `防制洗錢確認書（預覽文字檔）\n\n立書人：${form.representative}\n身分證字號：${form.nationalId}\n地址：${form.contactAddress}\n簽名：＿＿＿＿＿＿＿＿\n日期：＿＿年＿＿月＿＿日\n\n提醒：日期可填寫簽名當天日期`;
-    if (key === "shareholder") return `${form.company}\n股東同意書（預覽文字檔）\n\n茲同意設立${form.company}，訂定公司章程，並選任${form.representative}為董事。\n\n公司大章空位：\n\n\n\n（加蓋公司印章）\n\n股東姓名：${form.representative}\n親自簽名：＿＿＿＿＿＿＿＿\n日期：＿＿年＿＿月＿＿日\n\n提醒：日期為存入資本額日期，請先留空`;
-    if (key === "director") return `董事願任同意書（預覽文字檔）\n\n本人同意擔任${form.company}董事。\n\n立同意書人：${form.representative}\n親自簽名：＿＿＿＿＿＿＿＿\n日期：＿＿年＿＿月＿＿日\n\n提醒：日期為存入資本額日期，請先留空`;
-    return genericContent;
-  };
-  const getOutput = (item: typeof outputStates[number]) => {
-    const pending = `待補文件\n\n${item.label}\n\n${item.reason}\n\n請補齊後重新確認。`;
-    downloadText(item.ready ? item.key : `${item.key}-待補`, item.ready ? getContent(item.key) : pending);
-  };
-
-  return <main>
-    <header className="topbar"><div className="brand"><span>企</span><strong>公司設立登記智慧精靈</strong><em>PRIVATE PREVIEW</em></div><div className="browser-note"><LockKeyhole size={15}/>本預覽在瀏覽器暫時處理，離開後不保存</div></header>
-    <section className="hero"><div><p className="eyebrow">公司設立登記流程 · CR-2026-071</p><h1>{form.company}</h1><p>先上傳資料，再逐欄確認，最後下載市政府送件應備書件。</p></div><aside><strong>正式系統架構</strong><span>Vue.js + FastAPI + SQLite</span></aside></section>
-    <nav className="wizard" aria-label="公司設立登記步驟">{[[1,"上傳與辨識"],[2,"確認公司資料"],[3,"文件與下載"]].map(([number, label]) => <div key={number} className={step === number ? "active" : step > Number(number) ? "complete" : ""}><span>{step > Number(number) ? <Check size={15}/> : number}</span><strong>{label}</strong></div>)}</nav>
-    {step === 1 && <section className="stage" aria-labelledby="step1-title"><div className="stage-heading"><div><p className="eyebrow">STEP 1</p><h2 id="step1-title">上傳文件並確認辨識結果</h2><p>支援 PDF 與常見圖片格式；不支援或未知格式不會假裝為 OCR 成功。</p></div><div className="privacy-chip"><ShieldCheck size={17}/>本畫面僅供流程示意</div></div><div className="upload-zone" role="button" tabIndex={0} onDrop={handleDrop} onDragOver={(event) => event.preventDefault()} onClick={() => inputRef.current?.click()} onKeyDown={keyUpload}><UploadCloud size={33}/><strong>拖曳檔案至此，或點擊選擇檔案</strong><span>支援多檔上傳；未知格式會改列為人工確認</span><input ref={inputRef} type="file" multiple onChange={(event: ChangeEvent<HTMLInputElement>) => addFiles(event.target.files)} aria-label="選擇上傳文件" /></div><div className="file-list" aria-live="polite">{files.length === 0 ? <p className="empty-row">尚未選擇文件。可先加入身分或公司相關的示意文件。</p> : files.map((item) => <div className="file-row" key={item.id}><FileText size={20}/><div><strong>{item.file.name}</strong><span>{item.file.type || "未知類型"} · {formatBytes(item.file.size)}</span>{item.status === "processing" && <i><b style={{ width: `${item.progress}%` }} /></i>}{item.note && <small className="file-note">{item.note}</small>}</div><em className={item.status}>{item.status === "waiting" ? "等待辨識" : item.status === "processing" ? `辨識中 ${item.progress}%` : item.status === "success" ? "辨識成功" : "需人工確認"}</em></div>)}</div><div className="recognition-note"><AlertTriangle size={18}/><span>辨識成功僅代表檔案格式可處理，仍請核對欄位；未知檔案一律標示「需人工確認」，不會產生或套用 OCR 結果。</span></div><footer className="stage-actions"><button className="secondary" disabled>上一步</button><div><button className="secondary" disabled={!files.length || recognising} onClick={startRecognition}>{recognising ? "正在辨識…" : "開始辨識"}</button><button className="primary" disabled={!recognitionDone || recognising} onClick={() => setStep(2)}>前往公司資料 <ArrowRight size={16}/></button></div></footer>{recognitionDone && <p className="completion-note"><CheckCircle2 size={17}/>處理完成：{successFiles.length} 份辨識成功，{manualFiles.length} 份需人工確認。</p>}</section>}
-    {step === 2 && <section className="stage" aria-labelledby="step2-title"><div className="stage-heading"><div><p className="eyebrow">STEP 2</p><h2 id="step2-title">確認與修改擷取資料</h2><p>請逐欄核對來源文件；所有欄位都可直接修改。</p></div><div className="source-summary"><FileCheck2 size={17}/>已處理 {files.length} 份上傳文件</div></div><div className="expiry-alert"><AlertTriangle size={21}/><div><strong>名稱保留期限已屆滿</strong><span>核准保留期限為民國 115 年 07 月 21 日，送件前請先確認是否須重新辦理名稱預查。</span></div></div><div className="form-grid">{([['company','公司名稱','名稱預查核定書'],['representative','負責人','身分證／ERP'],['precheck','預查編號','名稱預查核定書'],['approval','核准日期','名稱預查核定書'],['expiry','核准保留期限','名稱預查核定書'],['capital','資本總額','公司章程／資本額證明'],['nationalId','身分證字號','身分證附件'],['contactAddress','負責人聯絡地址','身分證／ERP'],['registrationAddress','公司登記地址','ERP／地址證明']] as [keyof typeof form,string,string][]).map(([key,label,source]) => <label key={key}><span>{label}<em>{source}</em></span><input value={form[key]} onChange={(event) => updateForm(key,event.target.value)} /></label>)}</div><section className="business-section"><div className="business-heading"><div><h3>所營事業項目</h3><p>請依預查核定內容確認代碼與名稱，可新增、修改或刪除。</p></div><button className="secondary small" onClick={() => { setBusiness((current) => [...current, { id: crypto.randomUUID(), code: "", name: "" }]); setSaved(false); }}><Plus size={15}/>新增項目</button></div><div className="business-list">{business.map((item,index) => <div key={item.id}><span>{index + 1}</span><input aria-label={`第 ${index + 1} 項代碼`} value={item.code} onChange={(event) => changeBusiness(item.id,"code",event.target.value)} /><input aria-label={`第 ${index + 1} 項名稱`} value={item.name} onChange={(event) => changeBusiness(item.id,"name",event.target.value)} /><button aria-label={`刪除第 ${index + 1} 項`} onClick={() => { setBusiness((current) => current.filter((entry) => entry.id !== item.id)); setSaved(false); }}><Trash2 size={16}/></button></div>)}</div></section><footer className="stage-actions"><button className="secondary" onClick={() => setStep(1)}><ArrowLeft size={16}/>上一步</button><button className="primary" onClick={saveStepTwo}>儲存並前往文件 <ArrowRight size={16}/></button></footer>{saved && <p className="completion-note"><CheckCircle2 size={17}/>已暫存本頁修改，可在下一步查看動態文件狀態。</p>}</section>}
-    {step === 3 && <section className="stage" aria-labelledby="step3-title"><div className="stage-heading"><div><p className="eyebrow">STEP 3</p><h2 id="step3-title">下載市政府應備書件</h2><p>文件狀態會依目前表單完整度與上傳結果即時更新。</p></div><div className="ready-summary"><CheckCircle2 size={17}/>{readyCount} 份可下載 · {outputList.length-readyCount} 份待補</div></div><div className="output-list">{outputStates.map((item) => <div className="output-row" key={item.key}><div><span className={item.ready ? "output-ready" : "output-pending"}>{item.ready ? <Check size={15}/> : <AlertTriangle size={15}/>}</span><strong>{item.label}</strong><small>{item.reason}</small></div><button className={item.ready ? "download ready" : "download"} onClick={() => getOutput(item)}><Download size={16}/>{item.ready ? "下載預覽檔" : "下載待補說明"}</button></div>)}</div><section className="preview-section"><div><p className="eyebrow">文件預覽</p><h3>三份須簽署文件</h3><div className="preview-tabs" role="tablist">{([['aml','防制洗錢確認書'],['shareholder','股東同意書'],['director','董事願任同意書']] as [PreviewKey,string][]).map(([key,label]) => <button role="tab" aria-selected={preview === key} className={preview === key ? "selected" : ""} key={key} onClick={() => setPreview(key)}>{label}<ChevronRight size={15}/></button>)}</div></div><Preview tab={preview} company={form.company} representative={form.representative} nationalId={form.nationalId} contactAddress={form.contactAddress}/></section><footer className="stage-actions"><button className="secondary" onClick={() => setStep(2)}><ArrowLeft size={16}/>返回資料確認</button><button className="primary" onClick={() => setStep(1)}>建立下一個案件</button></footer></section>}
-  </main>;
+  if (view === "dashboard") return <CasesDashboard onOpenWizard={item => { setForm(item.companyName === "範例工程有限公司" ? initialForm : { company: item.companyName, representative: "", nationalId: "", precheck: "", approval: "", expiry: "", contactAddress: "", registrationAddress: "", capital: "" }); setBusiness(item.companyName === "範例工程有限公司" ? initialBusiness : []); setStep(1); setView("wizard"); }} />;
+  return <main><button className="secondary back-dashboard" onClick={() => setView("dashboard")}>返回案件總覽</button><header className="hero"><div><p className="eyebrow">公司設立文件流程</p><h1>三步完成送件準備</h1><p>請先上傳來源文件；系統產出書件不需要上傳。</p></div></header><nav className="wizard">{["來源文件", "公司資料", "產出與下載"].map((label, i) => <div key={label} className={step === i + 1 ? "active" : step > i + 1 ? "complete" : ""}><span>{i + 1}</span>{label}</div>)}</nav>
+    {step === 1 && <section className="stage"><div className="stage-heading"><div><p className="eyebrow">STEP 1</p><h2>來源文件</h2><p>每份文件各自上傳、預覽、替換或刪除。支援 PDF、JPG、JPEG、PNG、DOC、DOCX。</p></div></div>{["名稱預查", "市政府設立", "國稅局接續"].map(phase => <section className="source-phase" key={phase}><h3>{phase}</h3>{slots.filter(slot => slot.phase === phase).map(slot => <div className="slot-card" key={slot.key}><div><strong>{slot.title} {slot.required ? <em>必填</em> : <em className="optional">選填</em>}</strong><small>{slot.purpose}{slot.reuse ? `｜${slot.reuse}` : ""}</small>{linkFor(slot.key) && <small className="linked">已收到（包含在租約檔案中）：{linkFor(slot.key)!.sourceFileName}，第 {linkFor(slot.key)!.pageRange} 頁</small>}</div><div className="slot-drop" onDragOver={event => event.preventDefault()} onDrop={event => drop(event, slot.key)}><input ref={node => { refs.current[slot.key] = node; }} type="file" multiple={slot.multiple} accept=".pdf,.jpg,.jpeg,.png,.doc,.docx" onChange={(event: ChangeEvent<HTMLInputElement>) => addFiles(slot.key, event.target.files)} /><button className="secondary small" onClick={() => refs.current[slot.key]?.click()}><UploadCloud size={15}/>選擇或拖曳</button><span>{slot.multiple ? "最多 2 份" : "限 1 份"}</span></div><div className="slot-files">{files[slot.key].map((file, index) => <div className="file-row" key={`${file.name}-${index}`}><FileText size={18}/><div><strong>{file.name}</strong><span>{ext(file).toUpperCase()}・{bytes(file.size)}・{supported(file) ? "已收到" : "不支援，需人工確認"}</span></div><button aria-label="預覽原檔" onClick={() => previewFile(file)}><Eye size={16}/></button><button aria-label="替換檔案" onClick={() => refs.current[slot.key]?.click()}>替換</button><button aria-label="刪除檔案" onClick={() => remove(slot.key, index)}><Trash2 size={16}/></button></div>)}{!files[slot.key].length && !linkFor(slot.key) && <small className="pending">{slot.required ? "待補" : "尚未提供"}</small>}</div></div>)}</section>)}
+      {links.some(link => link.status !== "dismissed") && <section className="link-suggestions"><h3>合併檔關聯建議</h3><p>示範辨識／未實際執行 OCR，需人工確認。未確認前不視為已收到。</p>{links.filter(link => link.status !== "dismissed").map(link => <div key={link.targetSlot}><strong>{slots.find(slot => slot.key === link.targetSlot)!.title}</strong><span>建議來源：{link.sourceFileName}（{link.confidence}信心）</span><input aria-label={`${link.targetSlot} 頁碼範圍`} value={link.pageRange} onChange={event => updateLink(link.targetSlot, { pageRange: event.target.value })} placeholder="例如 3-5" disabled={link.status === "confirmed"}/>{link.status === "confirmed" ? <><button className="secondary small" onClick={() => updateLink(link.targetSlot, { status: "suggested" })}>取消關聯</button><button className="secondary small" onClick={() => previewFile(files.lease[0])}><Eye size={15}/>預覽來源</button></> : <><button disabled={!/^\d+(?:-\d+)?$/.test(link.pageRange)} className="primary small" onClick={() => updateLink(link.targetSlot, { status: "confirmed" })}>確認關聯</button><button className="secondary small" onClick={() => updateLink(link.targetSlot, { status: "dismissed" })}>取消</button></>}</div>)}</section>}
+      {!canStart && <p className="recognition-note"><AlertTriangle size={17}/>開始辨識與繼續至少需要名稱預查核定書及身分證。</p>}{requiredMissing.length > 0 && <p className="recognition-note">其他必填待補：{requiredMissing.map(slot => slot.title).join("、")}；可先繼續，待補狀態會保留至 Step 3。</p>}<footer className="stage-actions"><button className="primary" disabled={!canStart || recognising} onClick={startRecognition}>{recognising ? "辨識中…" : "開始辨識"}</button><button className="secondary" disabled={!canStart} onClick={() => setStep(2)}>先繼續填寫 <ArrowRight size={16}/></button></footer>{recognitionDone && <p className="completion-note"><Check size={17}/>已完成文件狀態檢查；不支援格式已標示需人工確認。</p>}</section>}
+    {step === 2 && <section className="stage"><p className="eyebrow">STEP 2</p><h2>公司資料</h2><p className="expiry-alert"><AlertTriangle size={18}/><span><strong>名稱保留期限已屆滿</strong>名稱保留期限已屆滿，送件前請先確認是否仍可使用或需重新預查。</span></p><div className="form-grid">{(["company", "representative", "nationalId", "precheck", "approval", "expiry", "contactAddress", "registrationAddress", "capital"] as (keyof typeof form)[]).map(key => <label key={key}><span>{{ company: "公司名稱", representative: "負責人", nationalId: "身分證字號", precheck: "預查編號", approval: "核准日期", expiry: "預查期限", contactAddress: "聯絡地址", registrationAddress: "公司所在地", capital: "資本額" }[key]}</span><input value={form[key]} onChange={event => setForm(current => ({ ...current, [key]: event.target.value }))}/></label>)}</div><section className="business-section"><h3>營業項目（6 項）</h3>{business.map((item, index) => <div className="business-list" key={`${index}-${item}`}><input value={item} onChange={event => setBusiness(current => current.map((entry, i) => i === index ? event.target.value : entry))}/><button className="secondary small" onClick={() => setBusiness(current => current.filter((_, i) => i !== index))}>刪除</button></div>)}<button className="secondary small" onClick={() => setBusiness(current => [...current, ""])}>新增營業項目</button></section><footer className="stage-actions"><button className="secondary" onClick={() => setStep(1)}><ArrowLeft size={16}/>上一步</button><button className="primary" onClick={() => setStep(3)}>前往產出</button></footer></section>}
+    {step === 3 && <section className="stage"><p className="eyebrow">STEP 3</p><h2>產出與下載</h2><p>系統產出四份 Word XML；來源附件一律下載原始檔並保留原檔名。</p><div className="output-list">{outputLabels.map(item => { const state = outputState(item.key); return <div className="output-row" key={item.key}><div><span className={state.ready ? "output-ready" : "output-pending"}>{state.ready ? <Check size={15}/> : <AlertTriangle size={15}/>}</span><strong>{item.label}</strong><small>{state.reason}</small></div><button disabled={!state.ready} className={state.ready ? "download ready" : "download"} onClick={() => output(item.key)}><Download size={16}/>{state.ready ? "下載" : state.reason}</button></div>; })}</div><footer className="stage-actions"><button className="secondary" onClick={() => setStep(2)}><ArrowLeft size={16}/>上一步</button></footer></section>}</main>;
 }

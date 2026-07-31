@@ -1,4 +1,19 @@
-// Intentionally empty by default.
-// Add Drizzle tables here when the site actually needs a database.
-// See examples/d1/db/schema.ts for an opt-in example.
-export {};
+import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+
+export const employees = sqliteTable("employees", {
+  id: integer("id").primaryKey(),
+  name: text("name").notNull().unique(),
+});
+
+export const cases = sqliteTable("cases", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  companyName: text("company_name").notNull(),
+  summary: text("summary").notNull(),
+  employeeId: integer("employee_id").notNull().references(() => employees.id),
+  status: text("status", { enum: ["ongoing", "completed"] }).notNull().default("ongoing"),
+  progress: integer("progress").notNull().default(0),
+  updatedAt: text("updated_at").notNull(),
+  completedAt: text("completed_at"),
+  bonusTwd: integer("bonus_twd").notNull().default(500),
+  createdAt: text("created_at").notNull(),
+});
