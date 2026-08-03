@@ -1,6 +1,6 @@
 import { ensureCaseDatabase, getRawDb } from "../../../db";
 
-const selectCases = "SELECT c.id, c.company_name AS companyName, c.summary, c.employee_id AS employeeId, e.name AS employeeName, c.status, c.stage, c.progress, c.updated_at AS updatedAt, c.completed_at AS completedAt, c.bonus_twd AS bonusTwd, c.created_at AS createdAt FROM cases c JOIN employees e ON e.id = c.employee_id";
+const selectCases = "SELECT c.id, c.company_name AS companyName, c.summary, c.employee_id AS employeeId, e.name AS employeeName, c.status, c.stage, c.progress, c.updated_at AS updatedAt, c.completed_at AS completedAt, c.created_at AS createdAt FROM cases c JOIN employees e ON e.id = c.employee_id";
 
 export async function GET(request: Request) {
   try {
