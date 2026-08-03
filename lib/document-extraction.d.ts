@@ -1,0 +1,11 @@
+export type AddressCandidate = { address: string; sourceFile: string; page: number; pageRange: string; confidence: "高" | "中" | "低"; evidence: string; score: number };
+export type DocumentDetection = { key: string; label: string; sourceFile: string; pageRange: string; evidence: string; score: number; confidence: "高" | "低" };
+export type ExtractionResult = { status: "success" | "review" | "error"; method: string; progress: number; message: string; pageCount: number; pages: { page: number; text: string }[]; candidates: AddressCandidate[]; detections: DocumentDetection[] };
+export function normalizeTaiwanAddress(value: string): string;
+export function extractAddressCandidates(pages: { page: number; text: string }[], sourceFile: string): AddressCandidate[];
+export function detectIncludedDocuments(pages: { page: number; text: string }[], sourceFile: string): DocumentDetection[];
+export function formatPageRange(pageNumbers: number[]): string;
+export function parsePageRange(value: string, pageCount: number): number[];
+export function splitPdfPages(bytes: Uint8Array, pageRange: string, pageCount: number): Promise<Uint8Array>;
+export function collectPageTexts(pageCount: number, extractPageText: (page: number) => Promise<string>): Promise<{ page: number; text: string }[]>;
+export function extractDocument(file: File, onUpdate?: (state: { status: string; progress: number; method: string; message: string }) => void): Promise<ExtractionResult>;

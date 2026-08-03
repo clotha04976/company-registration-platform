@@ -2,35 +2,101 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { strFromU8, unzipSync } from "fflate";
-import { buildDocx, buildZip } from "../lib/ooxml.mjs";
+import {
+  buildDocx,
+  buildRegistrationFormDocx,
+  buildZip,
+} from "../lib/ooxml.mjs";
+import {
+  collectPageTexts,
+  detectIncludedDocuments,
+  extractAddressCandidates,
+  formatPageRange,
+  parsePageRange,
+  splitPdfPages,
+} from "../lib/document-extraction.mjs";
+import { PDFDocument } from "pdf-lib";
 
 test("buildDocx creates a valid OOXML OPC package", () => {
-  const bytes = buildDocx("股東同意書", ["茲同意設立範例工程有限公司。", "日期：　　年　　月　　日"]);
-  assert.equal(bytes[0], 0x50); assert.equal(bytes[1], 0x4b);
+  const bytes = buildDocx("股東同意書", [
+    "茲同意設立範例工程有限公司。",
+    "日期：　　年　　月　　日",
+  ]);
+  assert.equal(bytes[0], 0x50);
+  assert.equal(bytes[1], 0x4b);
   const parts = unzipSync(bytes);
-  for (const name of ["[Content_Types].xml", "_rels/.rels", "word/document.xml", "word/styles.xml", "word/_rels/document.xml.rels", "docProps/core.xml", "docProps/app.xml"]) assert.ok(parts[name], `missing ${name}`);
-  assert.match(strFromU8(parts["_rels/.rels"]), /officeDocument[^>]+Target="word\/document.xml"/);
-  assert.match(strFromU8(parts["[Content_Types].xml"]), /wordprocessingml\.document\.main\+xml/);
-  assert.match(strFromU8(parts["word/_rels/document.xml.rels"]), /relationships\/styles[^>]+Target="styles.xml"/);
+  for (const name of [
+    "[Content_Types].xml",
+    "_rels/.rels",
+    "word/document.xml",
+    "word/styles.xml",
+    "word/_rels/document.xml.rels",
+    "docProps/core.xml",
+    "docProps/app.xml",
+  ])
+    assert.ok(parts[name], `missing ${name}`);
+  assert.match(
+    strFromU8(parts["_rels/.rels"]),
+    /officeDocument[^>]+Target="word\/document.xml"/,
+  );
+  assert.match(
+    strFromU8(parts["[Content_Types].xml"]),
+    /wordprocessingml\.document\.main\+xml/,
+  );
+  assert.match(
+    strFromU8(parts["word/_rels/document.xml.rels"]),
+    /relationships\/styles[^>]+Target="styles.xml"/,
+  );
   assert.match(strFromU8(parts["word/document.xml"]), /範例工程有限公司/);
 });
 
 test("batch ZIP preserves same-name files with unique names", () => {
-  const bytes = buildZip([{ name: "附件.pdf", data: new Uint8Array([1]) }, { name: "附件.pdf", data: new Uint8Array([2]) }]);
+  const bytes = buildZip([
+    { name: "附件.pdf", data: new Uint8Array([1]) },
+    { name: "附件.pdf", data: new Uint8Array([2]) },
+  ]);
   const files = unzipSync(bytes);
   assert.deepEqual(Object.keys(files).sort(), ["附件.pdf", "附件_2.pdf"]);
 });
 
 test("Step 1 follows the real staged intake workflow", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
-  for (const text of ["名稱預查階段", "名稱核准後・市政府設立階段", "籌備處存摺", "租約／地址相關文件整包", "公司所在地（可稍後補）", "確認包含"]) assert.match(page, new RegExp(text));
-  assert.match(page, /key: "passbook", phase: "名稱核准後・市政府設立階段"/);
-  assert.doesNotMatch(page, /land_title.*required|house_tax.*required|building_consent.*required|floor_plan.*required/);
+  const page = await readFile(
+    new URL("../app/page.tsx", import.meta.url),
+    "utf8",
+  );
+  for (const text of [
+    "名稱預查階段",
+    "名稱核准後・市政府設立階段",
+    "籌備處存摺",
+    "租約／地址相關文件整包",
+    "公司所在地（可稍後補）",
+    "確認包含",
+  ])
+    assert.match(page, new RegExp(text));
+  assert.match(
+    page,
+    /key:\s*"passbook"[\s\S]{0,100}phase:\s*"名稱核准後・市政府設立階段"/,
+  );
+  assert.doesNotMatch(
+    page,
+    /land_title.*required|house_tax.*required|building_consent.*required|floor_plan.*required/,
+  );
 });
 
 test("Step 3 exposes DOCX and all three batch downloads", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
-  for (const text of ["下載市政府全部文件", "下載國稅局全部文件", "下載所有可用文件", "待提供正式範本，不納入批次下載", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"]) assert.match(page, new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  const page = await readFile(
+    new URL("../app/page.tsx", import.meta.url),
+    "utf8",
+  );
+  for (const text of [
+    "下載市政府全部文件",
+    "下載國稅局全部文件",
+    "下載所有可用文件",
+    "待提供正式範本，不納入批次下載",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".docx",
+  ])
+    assert.match(page, new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.doesNotMatch(page, /downloadXml|\.xml`|Word XML/);
   assert.match(page, /new Set<File>/);
 });
@@ -39,24 +105,52 @@ test("case workflow supports four stages and backward-compatible completion", as
   const [dashboard, schema, api, database] = await Promise.all([
     readFile(new URL("../app/cases-dashboard.tsx", import.meta.url), "utf8"),
     readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
-    readFile(new URL("../app/api/cases/[id]/route.ts", import.meta.url), "utf8"),
+    readFile(
+      new URL("../app/api/cases/[id]/route.ts", import.meta.url),
+      "utf8",
+    ),
     readFile(new URL("../db/index.ts", import.meta.url), "utf8"),
   ]);
-  for (const stage of ["name_precheck", "city_government", "national_tax", "completed"]) { assert.match(dashboard, new RegExp(stage)); assert.match(schema, new RegExp(stage)); }
-  for (const label of ["名稱預查", "市政府", "國稅局", "已結案"]) assert.match(dashboard, new RegExp(label));
-  assert.match(api, /action === "complete"/); assert.match(api, /action === "restore"/); assert.match(api, /stage = 'national_tax'/);
-  assert.match(database, /PRAGMA table_info\(cases\)/); assert.match(database, /ALTER TABLE cases ADD COLUMN stage/);
+  for (const stage of [
+    "name_precheck",
+    "city_government",
+    "national_tax",
+    "completed",
+  ]) {
+    assert.match(dashboard, new RegExp(stage));
+    assert.match(schema, new RegExp(stage));
+  }
+  for (const label of ["名稱預查", "市政府", "國稅局", "已結案"])
+    assert.match(dashboard, new RegExp(label));
+  assert.match(api, /action === "complete"/);
+  assert.match(api, /action === "restore"/);
+  assert.match(api, /stage = 'national_tax'/);
+  assert.match(database, /PRAGMA table_info\(cases\)/);
+  assert.match(database, /ALTER TABLE cases ADD COLUMN stage/);
 });
 
 test("dashboard counts all cases by created month and exposes no compensation data", async () => {
   const [dashboard, route] = await Promise.all([
     readFile(new URL("../app/cases-dashboard.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../app/api/cases/dashboard/route.ts", import.meta.url), "utf8"),
+    readFile(
+      new URL("../app/api/cases/dashboard/route.ts", import.meta.url),
+      "utf8",
+    ),
   ]);
-  for (const forbidden of ["獎金", "NT$500", "bonusPerCase", "bonusTotal", "bonusTwd"]) assert.doesNotMatch(dashboard, new RegExp(forbidden));
+  for (const forbidden of [
+    "獎金",
+    "NT$500",
+    "bonusPerCase",
+    "bonusTotal",
+    "bonusTwd",
+  ])
+    assert.doesNotMatch(dashboard, new RegExp(forbidden));
   assert.match(route, /substr\(c\.created_at, 1, 7\)/);
   assert.match(route, /substr\(cases\.created_at, 1, 7\)/);
-  assert.doesNotMatch(route, /COUNT[^"\n]*completed_at|WHERE[^"\n]*completed_at|status\s*=\s*'completed'/);
+  assert.doesNotMatch(
+    route,
+    /COUNT[^"\n]*completed_at|WHERE[^"\n]*completed_at|status\s*=\s*'completed'/,
+  );
   assert.match(dashboard, /統計月份/);
   assert.match(dashboard, /目前使用者所選月件數/);
   assert.match(dashboard, /開案件數/);
@@ -64,26 +158,56 @@ test("dashboard counts all cases by created month and exposes no compensation da
 });
 
 test("history details open as a read-only preview without changing case state", async () => {
-  const dashboard = await readFile(new URL("../app/cases-dashboard.tsx", import.meta.url), "utf8");
+  const dashboard = await readFile(
+    new URL("../app/cases-dashboard.tsx", import.meta.url),
+    "utf8",
+  );
   assert.match(dashboard, /selectedHistoryCase/);
   assert.match(dashboard, /唯讀預覽/);
   assert.match(dashboard, /返回歷史/);
-  assert.match(dashboard, /onClick=\{\(\) => setSelectedHistoryCase\(item\)\}>查看資料/);
-  assert.doesNotMatch(dashboard, /update\([^)]*action:\s*"restore"[^)]*\)[^<]*>查看資料/);
-  assert.match(dashboard, /className="secondary" onClick=\{\(\) => void update\(item\.id, \{ action: "restore" \}/);
+  assert.match(
+    dashboard,
+    /onClick=\{\(\) => setSelectedHistoryCase\(item\)\}>查看資料/,
+  );
+  assert.doesNotMatch(
+    dashboard,
+    /update\([^)]*action:\s*"restore"[^)]*\)[^<]*>查看資料/,
+  );
+  assert.match(
+    dashboard,
+    /className="secondary" onClick=\{\(\) => void update\(item\.id, \{ action: "restore" \}/,
+  );
 });
 
 test("selected-month employee count expands monthly cases with safe routing", async () => {
   const [dashboard, route] = await Promise.all([
     readFile(new URL("../app/cases-dashboard.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../app/api/cases/dashboard/route.ts", import.meta.url), "utf8"),
+    readFile(
+      new URL("../app/api/cases/dashboard/route.ts", import.meta.url),
+      "utf8",
+    ),
   ]);
-  for (const field of ["monthlyCases", "companyName", "summary", "employeeId", "employeeName", "stage", "status", "progress", "createdAt", "completedAt"]) assert.match(route, new RegExp(field));
+  for (const field of [
+    "monthlyCases",
+    "companyName",
+    "summary",
+    "employeeId",
+    "employeeName",
+    "stage",
+    "status",
+    "progress",
+    "createdAt",
+    "completedAt",
+  ])
+    assert.match(route, new RegExp(field));
   assert.match(route, /WHERE substr\(c\.created_at, 1, 7\) = \?/);
   assert.match(dashboard, /所選月份目前使用者/);
   assert.match(dashboard, /開案明細/);
   assert.match(dashboard, /openMonthlyCase/);
-  assert.match(dashboard, /item\.status !== "completed"\) \{ onOpenWizard\(item\); return; \}/);
+  assert.match(
+    dashboard,
+    /item\.status !== "completed"\) \{ onOpenWizard\(item\); return; \}/,
+  );
   assert.match(dashboard, /setShowMonthlyCases\(false\)/);
   assert.match(dashboard, /setSelectedHistoryCase\(item\)/);
   assert.match(dashboard, /history-readonly-preview/);
@@ -94,23 +218,307 @@ test("selected-month employee count expands monthly cases with safe routing", as
 test("stale cases use a 30-day ongoing-only reminder and safe keep-active touch", async () => {
   const [dashboard, route, patchRoute] = await Promise.all([
     readFile(new URL("../app/cases-dashboard.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../app/api/cases/dashboard/route.ts", import.meta.url), "utf8"),
-    readFile(new URL("../app/api/cases/[id]/route.ts", import.meta.url), "utf8"),
+    readFile(
+      new URL("../app/api/cases/dashboard/route.ts", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../app/api/cases/[id]/route.ts", import.meta.url),
+      "utf8",
+    ),
   ]);
-  assert.match(route, /status = 'ongoing' AND datetime\(updated_at\) <= datetime\(\?, '-30 days'\)/);
-  assert.match(route, /c\.status = 'ongoing' AND datetime\(c\.updated_at\) <= datetime\(\?, '-30 days'\)/);
-  assert.match(route, /staleCount/); assert.match(route, /staleCases/);
-  const keepActiveSql = patchRoute.match(/body\.action === "keep_active"\) await db\.prepare\("([^"]+)"\)/)?.[1] ?? "";
-  assert.equal(keepActiveSql, "UPDATE cases SET updated_at = ? WHERE id = ? AND status = 'ongoing'");
+  assert.match(
+    route,
+    /status = 'ongoing' AND datetime\(updated_at\) <= datetime\(\?, '-30 days'\)/,
+  );
+  assert.match(
+    route,
+    /c\.status = 'ongoing' AND datetime\(c\.updated_at\) <= datetime\(\?, '-30 days'\)/,
+  );
+  assert.match(route, /staleCount/);
+  assert.match(route, /staleCases/);
+  const keepActiveSql =
+    patchRoute.match(
+      /body\.action === "keep_active"\) await db\.prepare\("([^"]+)"\)/,
+    )?.[1] ?? "";
+  assert.equal(
+    keepActiveSql,
+    "UPDATE cases SET updated_at = ? WHERE id = ? AND status = 'ongoing'",
+  );
   const keepActiveSetClause = keepActiveSql.split(/\s+WHERE\s+/i)[0];
-  assert.doesNotMatch(keepActiveSetClause, /stage\s*=|status\s*=|progress\s*=|completed_at\s*=/);
-  for (const copy of ["待確認", "仍在辦理", "案件已30天未更新，請確認進度", "是否已完成國稅局送件並可結案？", "case-stale", "stale-warning"]) assert.match(dashboard, new RegExp(copy));
+  assert.doesNotMatch(
+    keepActiveSetClause,
+    /stage\s*=|status\s*=|progress\s*=|completed_at\s*=/,
+  );
+  for (const copy of [
+    "待確認",
+    "仍在辦理",
+    "案件已30天未更新，請確認進度",
+    "是否已完成國稅局送件並可結案？",
+    "case-stale",
+    "stale-warning",
+  ])
+    assert.match(dashboard, new RegExp(copy));
   assert.doesNotMatch(route, /action:\s*"complete"/);
 });
 
 test("sensitive data remains fully visible in confirmation and documents", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
-  assert.match(page, /A123456789/); assert.match(page, /身分證字號（完整顯示）/); assert.doesNotMatch(page, /遮罩|碼掉|mask/i);
-  for (const retainedContent of ["王小明", "臺北市中正區範例路1號", "第十六條", "公司大章", "親簽"]) assert.match(page, new RegExp(retainedContent));
+  const page = await readFile(
+    new URL("../app/page.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(page, /A123456789/);
+  assert.match(page, /身分證字號（完整顯示）/);
+  assert.doesNotMatch(page, /遮罩|碼掉|mask/i);
+  for (const retainedContent of [
+    "王小明",
+    "臺北市中正區範例路1號",
+    "第十六條",
+    "公司大章",
+    "親簽",
+  ])
+    assert.match(page, new RegExp(retainedContent));
   assert.doesNotMatch(page, /Vue\.js|FastAPI|SQLite/);
+});
+
+test("address parser ranks premises context above personal and communication addresses", () => {
+  const candidates = extractAddressCandidates(
+    [
+      {
+        page: 1,
+        text: "出租人戶籍地址：桃園市桃園區中正路100號5樓；通訊地址同上。",
+      },
+      {
+        page: 2,
+        text: "租賃標的／房屋所在地：台中市西屯區台灣大道三段99號12樓，作為公司登記使用。",
+      },
+      { page: 3, text: "承租人聯絡地址：新北市板橋區文化路一段20號3樓。" },
+    ],
+    "地址整包.pdf",
+  );
+  assert.ok(candidates.length >= 2);
+  assert.equal(candidates[0].address, "臺中市西屯區台灣大道三段99號12樓");
+  assert.equal(candidates[0].sourceFile, "地址整包.pdf");
+  assert.equal(candidates[0].page, 2);
+  assert.match(candidates[0].evidence, /租賃標的|房屋所在地/);
+  assert.ok(
+    candidates[0].score >
+      candidates.find((candidate) => candidate.address.includes("中正路"))
+        ?.score,
+  );
+});
+
+test("page extraction adapter can be injected without running OCR", async () => {
+  const calls = [];
+  const pages = await collectPageTexts(3, async (page) => {
+    calls.push(page);
+    return `第${page}頁文字`;
+  });
+  assert.deepEqual(calls, [1, 2, 3]);
+  assert.deepEqual(
+    pages.map((page) => page.text),
+    ["第1頁文字", "第2頁文字", "第3頁文字"],
+  );
+});
+
+test("client extraction uses real lazy PDF and OCR engines with truthful UI states", async () => {
+  const [moduleSource, page] = await Promise.all([
+    readFile(
+      new URL("../lib/document-extraction.mjs", import.meta.url),
+      "utf8",
+    ),
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+  ]);
+  assert.match(moduleSource, /import\("pdfjs-dist"\)/);
+  assert.match(moduleSource, /import\("tesseract\.js"\)/);
+  assert.match(moduleSource, /worker\.terminate\(\)/);
+  assert.match(moduleSource, /目前無法自動辨識，請人工確認\/填寫/);
+  assert.doesNotMatch(
+    page,
+    /recogniseAddressBundle|setTimeout\(\(\) => \{\s*setDetections/,
+  );
+  for (const text of [
+    "pending",
+    "extracting",
+    "ocr",
+    "success",
+    "review",
+    "error",
+    "未辨識到公司所在地，請人工填寫",
+    "來源：",
+    "信心：",
+    "證據：",
+    "addressCandidates",
+    "registrationAddress: top.address",
+  ])
+    assert.match(page, new RegExp(text));
+  assert.match(page, /disabled=\{processingAddress\}/);
+  assert.match(page, /addressManual\.current = true/);
+});
+
+test("page classification merges consecutive and disjoint evidence ranges", () => {
+  const detections = detectIncludedDocuments(
+    [
+      { page: 1, text: "房屋租賃契約 出租人 承租人 租賃標的" },
+      { page: 2, text: "房屋租賃契約 出租人 承租人" },
+      { page: 3, text: "土地所有權狀 地號 權利範圍" },
+      { page: 5, text: "房屋租賃契約 租賃標的 出租人" },
+    ],
+    "整包.pdf",
+  );
+  const lease = detections.find((item) => item.key === "lease");
+  assert.equal(lease.pageRange, "1-2,5");
+  assert.equal(lease.confidence, "高");
+  assert.ok(lease.score >= 70);
+  assert.match(lease.evidence, /租賃契約/);
+  assert.equal(formatPageRange([5, 2, 1, 2]), "1-2,5");
+});
+
+test("checklist page does not contaminate attached-document page ranges", () => {
+  const pages = [];
+  for (let page = 1; page <= 8; page += 1)
+    pages.push({ page, text: "房屋租賃契約 出租人 承租人 租賃標的" });
+  pages.push({
+    page: 9,
+    text: "文件簽收確認單，請逐一核對並提供以下資料：租賃契約、位置圖、建物所有權狀、房屋使用同意書、房屋稅單。出租人及承租人簽收。",
+  });
+  pages.push({ page: 10, text: "營業場所位置圖 比例尺 圖例" });
+  pages.push({ page: 11, text: "建物所有權狀 地號 權利範圍" });
+  pages.push({ page: 12, text: "房屋使用同意書 同意作為公司登記" });
+  pages.push({ page: 13, text: "房屋稅繳款書 房屋稅籍 房屋稅" });
+  const detections = detectIncludedDocuments(
+    pages,
+    "樂客 營業登記租賃合約.pdf",
+  );
+  const ranges = Object.fromEntries(
+    detections.map((item) => [item.key, item.pageRange]),
+  );
+  assert.equal(ranges.lease, "1-9");
+  assert.equal(ranges.floor_plan, "10");
+  assert.equal(ranges.land_title, "11");
+  assert.equal(ranges.building_consent, "12");
+  assert.equal(ranges.house_tax, "13");
+  for (const key of [
+    "floor_plan",
+    "land_title",
+    "building_consent",
+    "house_tax",
+  ])
+    assert.doesNotMatch(ranges[key], /(?:^|[,-])9(?:$|[,-])/);
+});
+
+test("page range validation and pdf-lib splitting are deterministic", async () => {
+  assert.deepEqual(parsePageRange("1-2,5,2", 5), [1, 2, 5]);
+  assert.throws(() => parsePageRange("0,2", 5), /頁碼超出/);
+  assert.throws(() => parsePageRange("2-9", 5), /頁碼超出/);
+  assert.throws(() => parsePageRange("x", 5), /格式/);
+  const source = await PDFDocument.create();
+  source.addPage();
+  source.addPage();
+  source.addPage();
+  const split = await splitPdfPages(await source.save(), "1,3", 3);
+  assert.equal((await PDFDocument.load(split)).getPageCount(), 2);
+});
+
+test("invalid manual page ranges are shown inline and preserved in batch downloads", async () => {
+  const page = await readFile(
+    new URL("../app/page.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(page, /parsePageRange/);
+  assert.match(page, /detectionRangeError/);
+  assert.match(page, /頁碼格式不正確/);
+  assert.match(page, /頁碼超出文件範圍/);
+  assert.match(page, /disabled=\{Boolean\(detectionRangeError\(item\)\)\}/);
+  assert.match(page, /catch \{\s*originals\.add\(source\);\s*\}/);
+});
+
+test("registration form DOCX is a two-page A4 table using dynamic official fields", async () => {
+  const bytes = buildRegistrationFormDocx({
+    company: "範例工程有限公司",
+    precheck: "115004506",
+    registrationAddress: "臺中市西屯區台灣大道三段99號12樓",
+    capital: "1,000,000",
+    representative: "王小明",
+    nationalId: "A123456789",
+    contactAddress: "臺北市中正區範例路1號",
+    contactPhone: "",
+    registrationPostalCode: "",
+    contactPostalCode: "330018",
+    business: [
+      "E599010 配管工程業",
+      "E601010 電器承裝業",
+      "E603050 自動控制設備工程業",
+      "E603090 照明設備安裝工程業",
+      "IG03010 能源技術服務業",
+      "ZZ99999 除許可業務外",
+    ],
+  });
+  const documentXml = strFromU8(unzipSync(bytes)["word/document.xml"]);
+  for (const marker of [
+    "有限公司設立登記表",
+    "印章",
+    "預查編號",
+    "統一編號",
+    "公司所在地",
+    "資本總額",
+    "董事人數",
+    "代表人姓名",
+    "公司章程訂定日期",
+    "所營事業",
+    "董事、股東名單",
+    "公務記載蓋章欄",
+    "範例工程有限公司",
+    "王小明",
+    "A123456789",
+    "115004506",
+    "E599010",
+    "配管工程業",
+    "<w:tbl>",
+    "<w:tblBorders>",
+    "<w:tblGrid>",
+    "<w:tcW",
+    'w:type="page"',
+    'w:w="11906"',
+    "標楷體",
+    "公司印章",
+    "代表公司負責人印章",
+    "公司預查編號",
+    "公司統一編號",
+    "公司聯絡電話",
+    "僑外投資事業",
+    "陸資",
+    "一人公司",
+    "擬合併公司資料明細",
+    "核准登記日期文號",
+    "編號",
+    "代碼",
+    "營業項目說明",
+    "姓名(或法人名稱)",
+    "身分證號(或法人統一編號)",
+    "出資額(元)",
+    "(郵遞區號)住所或居所(或法人所在地)",
+  ])
+    assert.ok(documentXml.includes(marker), marker);
+  assert.ok((documentXml.match(/<w:tr>/g) ?? []).length >= 25);
+  assert.match(documentXml, /<w:trHeight w:val="1600" w:hRule="atLeast"\/>/);
+  assert.match(documentXml, /<w:trHeight w:val="1400" w:hRule="atLeast"\/>/);
+  assert.equal((documentXml.match(/330018/g) ?? []).length, 1);
+  assert.match(documentXml, /330018臺北市中正區範例路1號/);
+  assert.match(documentXml, />臺中市西屯區台灣大道三段99號12樓</);
+  const page = await readFile(
+    new URL("../app/page.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    page,
+    /key:\s*"city_registration_form"[\s\S]{0,180}kind:\s*"generated"[\s\S]{0,120}generatedKey:\s*"registration_form"/,
+  );
+  assert.match(page, /待補公司所在地/);
+  assert.match(page, /!form\.registrationAddress/);
+  assert.match(page, /registrationPostalCode/);
+  assert.match(page, /contactPostalCode/);
+  assert.doesNotMatch(page, /\bpostalCode\b/);
+  assert.match(page, /splitPdfPages/);
+  assert.match(page, /!splitAdded[\s\S]{0,180}originals\.add\(source\)/);
 });
