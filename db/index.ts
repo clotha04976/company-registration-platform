@@ -20,21 +20,22 @@ export function ensureCaseDatabase() {
     const db = await getRawDb();
     await db.batch([
       db.prepare("CREATE TABLE IF NOT EXISTS employees (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE)"),
-      db.prepare("CREATE TABLE IF NOT EXISTS cases (id INTEGER PRIMARY KEY AUTOINCREMENT, company_name TEXT NOT NULL, summary TEXT NOT NULL, employee_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'ongoing', progress INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, completed_at TEXT, bonus_twd INTEGER NOT NULL DEFAULT 500, created_at TEXT NOT NULL, FOREIGN KEY(employee_id) REFERENCES employees(id))"),
+      db.prepare("CREATE TABLE IF NOT EXISTS cases (id INTEGER PRIMARY KEY AUTOINCREMENT, company_name TEXT NOT NULL, summary TEXT NOT NULL, employee_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'ongoing', stage TEXT NOT NULL DEFAULT 'name_precheck', progress INTEGER NOT NULL DEFAULT 20, updated_at TEXT NOT NULL, completed_at TEXT, bonus_twd INTEGER NOT NULL DEFAULT 500, created_at TEXT NOT NULL, FOREIGN KEY(employee_id) REFERENCES employees(id))"),
       db.prepare("CREATE INDEX IF NOT EXISTS cases_status_updated_idx ON cases(status, updated_at DESC)"),
       db.prepare("CREATE INDEX IF NOT EXISTS cases_completed_idx ON cases(completed_at DESC)"),
     ]);
+    const columns = await db.prepare("PRAGMA table_info(cases)").all<{ name: string }>();
+    if (!columns.results.some((column) => column.name === "stage")) await db.prepare("ALTER TABLE cases ADD COLUMN stage TEXT NOT NULL DEFAULT 'name_precheck'").run();
+    await db.prepare("UPDATE cases SET stage = CASE WHEN status = 'completed' THEN 'completed' WHEN progress >= 75 THEN 'national_tax' WHEN progress >= 35 THEN 'city_government' ELSE 'name_precheck' END WHERE stage IS NULL OR stage = '' OR (stage = 'name_precheck' AND progress > 20)").run();
     await db.batch(employeeNames.map((name, index) => db.prepare("INSERT OR IGNORE INTO employees (id, name) VALUES (?, ?)").bind(index + 1, name)));
     const now = new Date().toISOString();
-    await db.prepare("INSERT OR IGNORE INTO cases (id, company_name, summary, employee_id, status, progress, updated_at, completed_at, bonus_twd, created_at) VALUES (1, ?, ?, 1, 'ongoing', 55, ?, NULL, 500, ?)").bind("範例工程有限公司", "冷凍、配管工程", now, now).run();
+    await db.prepare("INSERT OR IGNORE INTO cases (id, company_name, summary, employee_id, status, stage, progress, updated_at, completed_at, bonus_twd, created_at) VALUES (1, ?, ?, 1, 'ongoing', 'city_government', 55, ?, NULL, 500, ?)").bind("範例工程有限公司", "冷凍、配管工程", now, now).run();
     await db.batch([
-      db.prepare("INSERT OR IGNORE INTO cases (id, company_name, summary, employee_id, status, progress, updated_at, completed_at, bonus_twd, created_at) VALUES (2, '示意：晴川設計有限公司', '室內設計示意案件', 2, 'completed', 100, ?, ?, 500, ?)").bind(now, new Date().toISOString(), now),
-      db.prepare("INSERT OR IGNORE INTO cases (id, company_name, summary, employee_id, status, progress, updated_at, completed_at, bonus_twd, created_at) VALUES (3, '示意：日和餐飲有限公司', '餐飲業登記示意案件', 3, 'completed', 100, ?, ?, 500, ?)").bind(now, new Date().toISOString(), now),
+      db.prepare("INSERT OR IGNORE INTO cases (id, company_name, summary, employee_id, status, stage, progress, updated_at, completed_at, bonus_twd, created_at) VALUES (2, '測試餐飲有限公司', '餐飲業設立登記', 2, 'completed', 'completed', 100, ?, ?, 500, ?)").bind(now, now, now),
+      db.prepare("INSERT OR IGNORE INTO cases (id, company_name, summary, employee_id, status, stage, progress, updated_at, completed_at, bonus_twd, created_at) VALUES (3, '測試工程有限公司', '工程業設立登記', 3, 'completed', 'completed', 100, ?, ?, 500, ?)").bind(now, now, now),
     ]);
   })();
   return initialized;
 }
 
-export async function getDb() {
-  return drizzle(await getRawDb() as never, { schema });
-}
+export async function getDb() { return drizzle(await getRawDb() as never, { schema }); }

@@ -8,6 +8,13 @@
       "when": 1785489756338,
       "tag": "0000_famous_obadiah_stane",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1785725332126,
+      "tag": "0001_striped_master_chief",
+      "breakpoints": true
     }
   ]
 }
