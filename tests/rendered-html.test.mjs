@@ -129,6 +129,28 @@ test("case workflow supports four stages and backward-compatible completion", as
   assert.match(database, /ALTER TABLE cases ADD COLUMN stage/);
 });
 
+test("dashboard keeps one editable stage control without workflow percentages", async () => {
+  const [dashboard, page] = await Promise.all([
+    readFile(new URL("../app/cases-dashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+  ]);
+  assert.doesNotMatch(dashboard, /className="stage-track"/);
+  assert.doesNotMatch(dashboard, /className="progress"/);
+  assert.match(
+    dashboard,
+    /目前進度[\s\S]{0,300}<select[\s\S]{0,300}value=\{item\.stage\}[\s\S]{0,900}void update\(item\.id, \{ stage \}\)/,
+  );
+  for (const [value, label] of [
+    ["name_precheck", "名稱預查"],
+    ["city_government", "市政府"],
+    ["national_tax", "國稅局"],
+    ["completed", "已結案"],
+  ])
+    assert.match(dashboard, new RegExp(`value: "${value}", label: "${label}"`));
+  assert.match(page, /extractions\[fileId\(file\)\]\.progress\}%/);
+  assert.match(page, /width: `\$\{extractions\[fileId\(file\)\]\.progress\}%`/);
+});
+
 test("dashboard counts all cases by created month and exposes no compensation data", async () => {
   const [dashboard, route] = await Promise.all([
     readFile(new URL("../app/cases-dashboard.tsx", import.meta.url), "utf8"),
@@ -167,7 +189,7 @@ test("history details open as a read-only preview without changing case state", 
   assert.match(dashboard, /返回歷史/);
   assert.match(
     dashboard,
-    /onClick=\{\(\) => setSelectedHistoryCase\(item\)\}>查看資料/,
+    /onClick=\{\(\) => setSelectedHistoryCase\(item\)\}[\s\S]{0,80}查看資料/,
   );
   assert.doesNotMatch(
     dashboard,
@@ -206,7 +228,7 @@ test("selected-month employee count expands monthly cases with safe routing", as
   assert.match(dashboard, /openMonthlyCase/);
   assert.match(
     dashboard,
-    /item\.status !== "completed"\) \{ onOpenWizard\(item\); return; \}/,
+    /item\.status !== "completed"\) \{[\s\S]{0,100}onOpenWizard\(item\);[\s\S]{0,50}return;/,
   );
   assert.match(dashboard, /setShowMonthlyCases\(false\)/);
   assert.match(dashboard, /setSelectedHistoryCase\(item\)/);
