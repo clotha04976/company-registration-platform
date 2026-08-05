@@ -24,6 +24,7 @@ import {
   splitPdfPages,
 } from "../lib/document-extraction.mjs";
 import CasesDashboard from "./cases-dashboard";
+import ApprovalTracking from "./approval-tracking";
 
 type SlotKey =
   | "identity"
@@ -313,6 +314,7 @@ const saveBlob = (blob: Blob, name: string) => {
 export default function Home() {
   const [view, setView] = useState<"dashboard" | "wizard">("dashboard");
   const [step, setStep] = useState(1);
+  const [activeCaseId, setActiveCaseId] = useState<number | null>(null);
   const [files, setFiles] = useState<SlotFiles>(emptyFiles);
   const [form, setForm] = useState(initialForm);
   const [business, setBusiness] = useState(initialBusiness);
@@ -680,26 +682,23 @@ export default function Home() {
     );
   };
 
-  const openWizard = (item: { companyName: string }) => {
-    setForm(
-      item.companyName === "範例工程有限公司"
-        ? initialForm
-        : {
-            company: item.companyName,
-            representative: "",
-            nationalId: "",
-            precheck: "",
-            approval: "",
-            expiry: "",
-            contactAddress: "",
-            registrationAddress: "",
-            contactPhone: "",
-            registrationPostalCode: "",
-            contactPostalCode: "",
-            capital: "",
-          },
-    );
-    setBusiness(item.companyName === "範例工程有限公司" ? initialBusiness : []);
+  const openWizard = (item: { id: number; companyName: string }) => {
+    setActiveCaseId(item.id);
+    setForm({
+      company: item.companyName,
+      representative: "",
+      nationalId: "",
+      precheck: "",
+      approval: "",
+      expiry: "",
+      contactAddress: "",
+      registrationAddress: "",
+      contactPhone: "",
+      registrationPostalCode: "",
+      contactPostalCode: "",
+      capital: "",
+    });
+    setBusiness([]);
     setFiles(emptyFiles());
     setExtractions({});
     setAddressCandidates([]);
@@ -786,7 +785,7 @@ export default function Home() {
         </div>
       </header>
       <nav className="wizard">
-        {["上傳資料", "確認公司資料", "下載送件文件"].map((label, index) => (
+        {["上傳資料", "確認公司資料", "下載送件文件", "核准公文追蹤"].map((label, index) => (
           <div
             key={label}
             className={
@@ -1209,8 +1208,15 @@ export default function Home() {
               <ArrowLeft size={16} />
               上一步
             </button>
+            <button className="primary" onClick={() => setStep(4)}>
+              前往核准追蹤
+              <ArrowRight size={16} />
+            </button>
           </footer>
         </section>
+      )}
+      {step === 4 && (
+        <ApprovalTracking caseId={activeCaseId} onBack={() => setStep(3)} />
       )}
     </main>
   );

@@ -455,6 +455,109 @@ test("invalid manual page ranges are shown inline and preserved in batch downloa
   assert.match(page, /catch \{\s*originals\.add\(source\);\s*\}/);
 });
 
+test("approval tracking schema, runtime initialization, and migration stay normalized", async () => {
+  const [schema, database, migration] = await Promise.all([
+    readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
+    readFile(new URL("../db/index.ts", import.meta.url), "utf8"),
+    readFile(
+      new URL("../drizzle/0003_steady_echo.sql", import.meta.url),
+      "utf8",
+    ),
+  ]);
+  for (const table of ["case_approval_documents", "registration_card_tracking"])
+    for (const source of [schema, database, migration])
+      assert.match(source, new RegExp(table));
+  assert.match(
+    schema,
+    /uniqueIndex\("case_approval_documents_case_agency_unique"\)/,
+  );
+  assert.match(schema, /index\("case_approval_documents_case_status_idx"\)/);
+  assert.match(
+    migration,
+    /FOREIGN KEY \(`case_id`\) REFERENCES `cases`\(`id`\)/,
+  );
+  assert.match(
+    migration,
+    /CREATE UNIQUE INDEX `case_approval_documents_case_agency_unique`/,
+  );
+  assert.match(
+    migration,
+    /CREATE INDEX `case_approval_documents_case_status_idx`/,
+  );
+  assert.ok(
+    migration.indexOf("DELETE FROM `case_approval_documents`") <
+      migration.indexOf("DELETE FROM `cases`"),
+  );
+  assert.match(
+    migration,
+    /DELETE FROM `sqlite_sequence` WHERE `name` IN \('cases', 'case_approval_documents'\)/,
+  );
+  assert.doesNotMatch(database, /INSERT OR IGNORE INTO cases/);
+  assert.match(database, /INSERT OR IGNORE INTO employees/);
+});
+
+test("case-scoped approvals API validates and upserts metadata without file bytes", async () => {
+  const api = await readFile(
+    new URL("../app/api/cases/[id]/approvals/route.ts", import.meta.url),
+    "utf8",
+  );
+  for (const marker of [
+    "not_received",
+    "received",
+    "archived",
+    "city_government",
+    "national_tax",
+    "approvalDate",
+    "documentNumber",
+    "cloudPath",
+    "originalReceived",
+    "customerCopySent",
+  ])
+    assert.match(api, new RegExp(marker));
+  assert.match(api, /SELECT id FROM cases WHERE id = \? LIMIT 1/);
+  assert.match(api, /ON CONFLICT\(case_id, agency\) DO UPDATE/);
+  assert.match(api, /ON CONFLICT\(case_id\) DO UPDATE/);
+  assert.match(api, /value === ""/);
+  assert.match(api, /UPDATE cases SET updated_at = \? WHERE id = \?/);
+  assert.match(api, /ownKeysOnly/);
+  assert.doesNotMatch(api, /base64|arrayBuffer|formData|file_bytes|blob/i);
+});
+
+test("Step 4 tracks approvals while local documents remain browser-only", async () => {
+  const [page, tracking] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/approval-tracking.tsx", import.meta.url), "utf8"),
+  ]);
+  for (const text of [
+    "核准公文追蹤",
+    "前往核准追蹤",
+    "市政府核准公文",
+    "國稅局核准公文",
+    "尚未收到",
+    "已收到",
+    "已歸檔",
+    "正本已收到",
+    "客戶份已寄出",
+    "儲存追蹤資料",
+    "檔案僅供本次辨識／預覽，不會永久保存",
+    "請人工確認核准日期與公文字號",
+    "複製雲端路徑",
+  ])
+    assert.match(`${page}\n${tracking}`, new RegExp(text));
+  assert.match(page, /step === 4/);
+  assert.match(page, /setActiveCaseId\(item\.id\)/);
+  assert.doesNotMatch(page, /item\.companyName === "範例工程有限公司"/);
+  assert.match(tracking, /extractDocument/);
+  assert.match(tracking, /發文字號\|文號/);
+  assert.match(tracking, /year < 1911 \? year \+ 1911 : year/);
+  assert.match(tracking, /navigator\.clipboard\.writeText/);
+  assert.match(tracking, /body: JSON\.stringify\(tracking\)/);
+  assert.doesNotMatch(
+    tracking,
+    /body:\s*(?:file|localFiles)|base64|FileReader|arrayBuffer/,
+  );
+});
+
 test("registration form DOCX is a two-page A4 table using dynamic official fields", async () => {
   const bytes = buildRegistrationFormDocx({
     company: "範例工程有限公司",

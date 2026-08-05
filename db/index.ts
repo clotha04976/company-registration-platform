@@ -23,17 +23,15 @@ export function ensureCaseDatabase() {
       db.prepare("CREATE TABLE IF NOT EXISTS cases (id INTEGER PRIMARY KEY AUTOINCREMENT, company_name TEXT NOT NULL, summary TEXT NOT NULL, employee_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'ongoing', stage TEXT NOT NULL DEFAULT 'name_precheck', progress INTEGER NOT NULL DEFAULT 20, updated_at TEXT NOT NULL, completed_at TEXT, bonus_twd INTEGER NOT NULL DEFAULT 500, created_at TEXT NOT NULL, FOREIGN KEY(employee_id) REFERENCES employees(id))"),
       db.prepare("CREATE INDEX IF NOT EXISTS cases_status_updated_idx ON cases(status, updated_at DESC)"),
       db.prepare("CREATE INDEX IF NOT EXISTS cases_completed_idx ON cases(completed_at DESC)"),
+      db.prepare("CREATE TABLE IF NOT EXISTS case_approval_documents (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id INTEGER NOT NULL, agency TEXT NOT NULL CHECK (agency IN ('city_government', 'national_tax')), status TEXT NOT NULL DEFAULT 'not_received' CHECK (status IN ('not_received', 'received', 'archived')), approval_date TEXT, document_number TEXT, cloud_path TEXT, updated_at TEXT NOT NULL, FOREIGN KEY(case_id) REFERENCES cases(id) ON DELETE CASCADE, UNIQUE(case_id, agency))"),
+      db.prepare("CREATE INDEX IF NOT EXISTS case_approval_documents_case_status_idx ON case_approval_documents(case_id, status)"),
+      db.prepare("CREATE TABLE IF NOT EXISTS registration_card_tracking (case_id INTEGER PRIMARY KEY NOT NULL, original_received INTEGER NOT NULL DEFAULT 0, customer_copy_sent INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, FOREIGN KEY(case_id) REFERENCES cases(id) ON DELETE CASCADE)"),
+      db.prepare("PRAGMA optimize"),
     ]);
     const columns = await db.prepare("PRAGMA table_info(cases)").all<{ name: string }>();
     if (!columns.results.some((column) => column.name === "stage")) await db.prepare("ALTER TABLE cases ADD COLUMN stage TEXT NOT NULL DEFAULT 'name_precheck'").run();
     await db.prepare("UPDATE cases SET stage = CASE WHEN status = 'completed' THEN 'completed' WHEN progress >= 75 THEN 'national_tax' WHEN progress >= 35 THEN 'city_government' ELSE 'name_precheck' END WHERE stage IS NULL OR stage = '' OR (stage = 'name_precheck' AND progress > 20)").run();
     await db.batch(employeeNames.map((name, index) => db.prepare("INSERT OR IGNORE INTO employees (id, name) VALUES (?, ?)").bind(index + 1, name)));
-    const now = new Date().toISOString();
-    await db.prepare("INSERT OR IGNORE INTO cases (id, company_name, summary, employee_id, status, stage, progress, updated_at, completed_at, bonus_twd, created_at) VALUES (1, ?, ?, 1, 'ongoing', 'city_government', 55, ?, NULL, 500, ?)").bind("範例工程有限公司", "冷凍、配管工程", now, now).run();
-    await db.batch([
-      db.prepare("INSERT OR IGNORE INTO cases (id, company_name, summary, employee_id, status, stage, progress, updated_at, completed_at, bonus_twd, created_at) VALUES (2, '測試餐飲有限公司', '餐飲業設立登記', 2, 'completed', 'completed', 100, ?, ?, 500, ?)").bind(now, now, now),
-      db.prepare("INSERT OR IGNORE INTO cases (id, company_name, summary, employee_id, status, stage, progress, updated_at, completed_at, bonus_twd, created_at) VALUES (3, '測試工程有限公司', '工程業設立登記', 3, 'completed', 'completed', 100, ?, ?, 500, ?)").bind(now, now, now),
-    ]);
   })();
   return initialized;
 }
