@@ -77,9 +77,11 @@ export const extractApprovalFields = (text: string) => {
 export default function ApprovalTracking({
   caseId,
   onBack,
+  onExit,
 }: {
   caseId: number | null;
   onBack: () => void;
+  onExit: () => void;
 }) {
   const [tracking, setTracking] = useState<Tracking>(emptyTracking);
   const [localFiles, setLocalFiles] = useState<Partial<Record<Agency, File>>>(
@@ -247,10 +249,19 @@ export default function ApprovalTracking({
         <p className="case-error">
           請先從案件首頁進入案件，才能載入及儲存核准公文追蹤。
         </p>
-        <button className="secondary" onClick={onBack}>
-          <ArrowLeft size={16} />
-          返回下載文件
-        </button>
+        <footer className="stage-actions">
+          <div className="stage-actions-left">
+            <button className="secondary" onClick={onBack}>
+              <ArrowLeft size={16} />
+              上一步
+            </button>
+          </div>
+          <div className="stage-actions-right">
+            <button className="secondary" onClick={onExit}>
+              返回案件清單
+            </button>
+          </div>
+        </footer>
       </section>
     );
 
@@ -401,18 +412,25 @@ export default function ApprovalTracking({
         </p>
       )}
       <footer className="stage-actions">
-        <button className="secondary" onClick={onBack}>
-          <ArrowLeft size={16} />
-          返回下載文件
-        </button>
-        <button
-          className="primary"
-          disabled={state === "loading" || state === "saving"}
-          onClick={() => void save()}
-        >
-          <Save size={16} />
-          {state === "saving" ? "儲存中…" : "儲存追蹤資料"}
-        </button>
+        <div className="stage-actions-left">
+          <button className="secondary" onClick={onBack}>
+            <ArrowLeft size={16} />
+            上一步
+          </button>
+        </div>
+        <div className="stage-actions-right">
+          <button
+            className="primary"
+            disabled={state === "loading" || state === "saving"}
+            onClick={() => void save()}
+          >
+            <Save size={16} />
+            {state === "saving" ? "儲存中…" : "儲存追蹤資料"}
+          </button>
+          <button className="secondary" onClick={onExit}>
+            返回案件清單
+          </button>
+        </div>
       </footer>
     </section>
   );

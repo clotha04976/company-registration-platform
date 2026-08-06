@@ -101,12 +101,41 @@ test("identity OCR is triggered only from the identity upload slot", async () =>
     assert.match(page, new RegExp(message));
   assert.match(
     page,
-    /processingAddress \|\| identityRecognition\.state === "processing"/,
+    /processingAddress\s*\|\|\s*identityRecognition\.state === "processing"/,
   );
   assert.match(
     page,
     /slot\.key === "identity"[\s\S]+"\.pdf,\.jpg,\.jpeg,\.png"/,
   );
+});
+
+test("wizard navigation lives in consistent step footers and supports mobile", async () => {
+  const [page, approval, css] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/approval-tracking.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+  const beforeHeader = page.slice(page.indexOf("return ("), page.indexOf("<header className=\"hero\">"));
+  assert.doesNotMatch(beforeHeader, /back-dashboard|返回案件清單/);
+  assert.match(
+    page,
+    /stage-actions-left[\s\S]+setView\("dashboard"\)[\s\S]+返回案件清單[\s\S]+stage-actions-right[\s\S]+setStep\(2\)[\s\S]+下一步：確認資料/,
+  );
+  assert.match(
+    page,
+    /setStep\(1\)[\s\S]+上一步[\s\S]+setStep\(3\)[\s\S]+下一步：下載文件/,
+  );
+  assert.match(
+    page,
+    /setStep\(2\)[\s\S]+上一步[\s\S]+setStep\(4\)[\s\S]+下一步：前往核准追蹤/,
+  );
+  assert.match(page, /onBack=\{\(\) => setStep\(3\)\}/);
+  assert.match(page, /onExit=\{\(\) => setView\("dashboard"\)\}/);
+  assert.match(approval, /onExit: \(\) => void/);
+  assert.match(approval, /onClick=\{onBack\}[\s\S]+上一步/);
+  assert.match(approval, /onClick=\{onExit\}[\s\S]+返回案件清單/);
+  assert.match(css, /@media\(max-width:760px\)[\s\S]+\.stage-actions\.stage-actions>div\{display:flex;flex-direction:column;width:100%\}/);
+  assert.match(css, /\.stage-actions\.stage-actions button\{width:100%\}/);
 });
 
 test("buildDocx creates a valid OOXML OPC package", () => {
@@ -468,7 +497,7 @@ test("client extraction uses real lazy PDF and OCR engines with truthful UI stat
     assert.match(page, new RegExp(text));
   assert.match(
     page,
-    /disabled=\{[\s\S]*processingAddress \|\| identityRecognition\.state === "processing"[\s\S]*\}/,
+    /disabled=\{[\s\S]*processingAddress\s*\|\|\s*identityRecognition\.state === "processing"[\s\S]*\}/,
   );
   assert.match(page, /addressManual\.current = true/);
 });

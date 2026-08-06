@@ -966,12 +966,6 @@ export default function Home() {
 
   return (
     <main>
-      <button
-        className="secondary back-dashboard"
-        onClick={() => setView("dashboard")}
-      >
-        返回案件清單
-      </button>
       <header className="hero">
         <div>
           <p className="eyebrow">公司設立登記作業</p>
@@ -1230,22 +1224,33 @@ export default function Home() {
               </div>
             </section>
           )}
+          {identityRecognition.state === "processing" && (
+            <small className="recognition-note" aria-live="polite">
+              身分證辨識完成後才能繼續
+            </small>
+          )}
           <footer className="stage-actions">
-            {identityRecognition.state === "processing" && (
-              <small className="recognition-note" aria-live="polite">
-                身分證辨識完成後才能繼續
-              </small>
-            )}
-            <button
-              className="primary"
-              disabled={
-                processingAddress || identityRecognition.state === "processing"
-              }
-              onClick={() => setStep(2)}
-            >
-              下一步：確認資料
-              <ArrowRight size={16} />
-            </button>
+            <div className="stage-actions-left">
+              <button
+                className="secondary"
+                onClick={() => setView("dashboard")}
+              >
+                返回案件清單
+              </button>
+            </div>
+            <div className="stage-actions-right">
+              <button
+                className="primary"
+                disabled={
+                  processingAddress ||
+                  identityRecognition.state === "processing"
+                }
+                onClick={() => setStep(2)}
+              >
+                下一步：確認資料
+                <ArrowRight size={16} />
+              </button>
+            </div>
           </footer>
         </section>
       )}
@@ -1375,13 +1380,18 @@ export default function Home() {
             </button>
           </section>
           <footer className="stage-actions">
-            <button className="secondary" onClick={() => setStep(1)}>
-              <ArrowLeft size={16} />
-              上一步
-            </button>
-            <button className="primary" onClick={() => setStep(3)}>
-              確認並前往下載
-            </button>
+            <div className="stage-actions-left">
+              <button className="secondary" onClick={() => setStep(1)}>
+                <ArrowLeft size={16} />
+                上一步
+              </button>
+            </div>
+            <div className="stage-actions-right">
+              <button className="primary" onClick={() => setStep(3)}>
+                下一步：下載文件
+                <ArrowRight size={16} />
+              </button>
+            </div>
           </footer>
         </section>
       )}
@@ -1427,19 +1437,27 @@ export default function Home() {
             "下載國稅局全部文件",
           )}
           <footer className="stage-actions">
-            <button className="secondary" onClick={() => setStep(2)}>
-              <ArrowLeft size={16} />
-              上一步
-            </button>
-            <button className="primary" onClick={() => setStep(4)}>
-              前往核准追蹤
-              <ArrowRight size={16} />
-            </button>
+            <div className="stage-actions-left">
+              <button className="secondary" onClick={() => setStep(2)}>
+                <ArrowLeft size={16} />
+                上一步
+              </button>
+            </div>
+            <div className="stage-actions-right">
+              <button className="primary" onClick={() => setStep(4)}>
+                下一步：前往核准追蹤
+                <ArrowRight size={16} />
+              </button>
+            </div>
           </footer>
         </section>
       )}
       {step === 4 && (
-        <ApprovalTracking caseId={activeCaseId} onBack={() => setStep(3)} />
+        <ApprovalTracking
+          caseId={activeCaseId}
+          onBack={() => setStep(3)}
+          onExit={() => setView("dashboard")}
+        />
       )}
     </main>
   );
