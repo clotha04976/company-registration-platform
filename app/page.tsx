@@ -19,15 +19,18 @@ import {
   buildZip,
 } from "../lib/ooxml.mjs";
 import {
+  enhanceIdentityDocument,
   extractDocument,
   parsePageRange,
   splitPdfPages,
 } from "../lib/document-extraction.mjs";
 import {
+  isCompleteIdentityResult,
   mergeIdentityFields,
   parseTaiwanIdentityText,
   selectIdentityResult,
 } from "../lib/identity-extraction.mjs";
+import { parsePrecheckText } from "../lib/precheck-extraction.mjs";
 import CasesDashboard from "./cases-dashboard";
 import ApprovalTracking from "./approval-tracking";
 
@@ -90,6 +93,10 @@ type IdentityResult = {
 };
 type IdentityRecognition = {
   state: "idle" | "processing" | "success" | "partial" | "review";
+  message: string;
+};
+type PrecheckRecognition = {
+  state: "idle" | "processing" | "success" | "review";
   message: string;
 };
 type GeneratedKey =
@@ -188,7 +195,23 @@ const runExtraction = extractDocument as unknown as (
     method: string;
     message: string;
   }) => void,
+  options?: { purpose?: "address" | "identity" | "precheck" | "generic" },
 ) => Promise<ExtractionResult>;
+const runIdentityEnhancement = enhanceIdentityDocument as unknown as (
+  file: File,
+  pages: { page: number; text: string }[],
+  onUpdate: (update: {
+    status: string;
+    progress: number;
+    method: string;
+    message: string;
+  }) => void,
+) => Promise<{
+  name: string;
+  nationalId: string;
+  rotation: number;
+  strategy: string;
+}>;
 
 const cityOutputs: OutputItem[] = [
   {
@@ -340,6 +363,8 @@ export default function Home() {
   >({});
   const [identityRecognition, setIdentityRecognition] =
     useState<IdentityRecognition>({ state: "idle", message: "" });
+  const [precheckRecognition, setPrecheckRecognition] =
+    useState<PrecheckRecognition>({ state: "idle", message: "" });
   const [addressCandidates, setAddressCandidates] = useState<
     AddressCandidate[]
   >([]);
@@ -356,6 +381,16 @@ export default function Home() {
   const identityRun = useRef(0);
   const identityManual = useRef({ representative: false, nationalId: false });
   const lastAutoIdentity = useRef({ representative: "", nationalId: "" });
+  const activePrecheckFile = useRef("");
+  const precheckRun = useRef(0);
+  const precheckManual = useRef({
+    company: false,
+    precheck: false,
+    approval: false,
+    expiry: false,
+    business: false,
+  });
+  const stageUpdatedCases = useRef(new Set<number>());
   const refs = useRef<Record<SlotKey, HTMLInputElement | null>>(
     {} as Record<SlotKey, HTMLInputElement | null>,
   );
@@ -404,7 +439,7 @@ export default function Home() {
           message: update.message,
         },
       }));
-    });
+    }, { purpose: "address" });
     if (!activeAddressFiles.current.has(id)) return;
     setExtractions((current) => ({
       ...current,
@@ -523,13 +558,47 @@ export default function Home() {
           message: update.message,
         },
       }));
-    });
+    }, { purpose: "identity" });
     if (
       run !== identityRun.current ||
       !activeIdentityFiles.current.includes(id)
     )
       return;
-    const parsed = parseTaiwanIdentityText(result.pages);
+    let parsed = parseTaiwanIdentityText(result.pages);
+    let correction: { rotation?: number; strategy?: string } = {};
+    if (!isCompleteIdentityResult(parsed)) {
+      try {
+        const enhanced = await runIdentityEnhancement(
+          file,
+          result.pages,
+          (update) => {
+            if (
+              run !== identityRun.current ||
+              !activeIdentityFiles.current.includes(id)
+            )
+              return;
+            setExtractions((current) => ({
+              ...current,
+              [id]: {
+                status: update.status as ExtractionStatus,
+                progress: update.progress,
+                method: update.method,
+                message: update.message,
+              },
+            }));
+          },
+        );
+        parsed = { name: enhanced.name, nationalId: enhanced.nationalId };
+        correction = enhanced;
+      } catch {
+        correction = { strategy: "enhancement-failed" };
+      }
+      if (
+        run !== identityRun.current ||
+        !activeIdentityFiles.current.includes(id)
+      )
+        return;
+    }
     const identity = { ...parsed, sourceFile: file.name };
     setExtractions((current) => ({
       ...current,
@@ -539,8 +608,12 @@ export default function Home() {
         method: result.method,
         message:
           parsed.name && parsed.nationalId
-            ? "已辨識姓名與有效身分證字號，請確認"
-            : "未完整辨識，請人工輸入",
+            ? correction.rotation || correction.strategy?.startsWith("crop-")
+              ? "已完成方向校正或局部強化，請人工確認"
+              : "已辨識姓名與有效身分證字號，請人工確認"
+            : correction.strategy === "enhancement-failed"
+              ? "方向校正未完成，請人工輸入"
+              : "未完整辨識，請人工輸入",
         result,
       },
     }));
@@ -550,13 +623,112 @@ export default function Home() {
       return next;
     });
   };
+  const processPrecheckFile = async (file: File, run: number) => {
+    const id = fileId(file);
+    setExtractions((current) => ({
+      ...current,
+      [id]: {
+        status: "pending",
+        progress: 0,
+        method: "等待處理",
+        message: "準備辨識名稱預查核定書",
+      },
+    }));
+    const result = await runExtraction(
+      file,
+      (update) => {
+        if (run !== precheckRun.current || activePrecheckFile.current !== id)
+          return;
+        setExtractions((current) => ({
+          ...current,
+          [id]: {
+            status: update.status as ExtractionStatus,
+            progress: update.progress,
+            method: update.method,
+            message: update.message,
+          },
+        }));
+      },
+      { purpose: "precheck" },
+    );
+    if (run !== precheckRun.current || activePrecheckFile.current !== id) return;
+    const parsed = parsePrecheckText(result.pages);
+    const valid = Boolean(parsed.precheckNumber);
+    if (valid) {
+      setForm((current) => ({
+        ...current,
+        company:
+          precheckManual.current.company || !parsed.companyName
+            ? current.company
+            : parsed.companyName,
+        precheck: precheckManual.current.precheck
+          ? current.precheck
+          : parsed.precheckNumber,
+        approval:
+          precheckManual.current.approval || !parsed.approvalDate
+            ? current.approval
+            : parsed.approvalDate,
+        expiry:
+          precheckManual.current.expiry || !parsed.expiryDate
+            ? current.expiry
+            : parsed.expiryDate,
+      }));
+      if (!precheckManual.current.business && parsed.businessItems.length)
+        setBusiness(
+          parsed.businessItems.map((item) => `${item.code} ${item.name}`),
+        );
+    }
+    let stageUpdated = false;
+    if (
+      valid &&
+      activeCaseId &&
+      !stageUpdatedCases.current.has(activeCaseId)
+    ) {
+      try {
+        const response = await fetch(`/api/cases/${activeCaseId}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "advance_after_precheck" }),
+        });
+        if (response.ok) {
+          const payload = (await response.json()) as {
+            stage?: string;
+            changed?: boolean;
+          };
+          stageUpdatedCases.current.add(activeCaseId);
+          stageUpdated =
+            payload.stage === "city_government" && payload.changed === true;
+        }
+      } catch {
+        stageUpdated = false;
+      }
+    }
+    if (run !== precheckRun.current || activePrecheckFile.current !== id) return;
+    setExtractions((current) => ({
+      ...current,
+      [id]: {
+        status: valid ? "success" : "review",
+        progress: 100,
+        method: result.method,
+        message: valid ? "已辨識預查資料，請人工確認" : "未辨識有效預查編號",
+        result,
+      },
+    }));
+    setPrecheckRecognition({
+      state: valid ? "success" : "review",
+      message: valid
+        ? `已從「${file.name}」帶入預查資料，請至下一步確認。${stageUpdated ? "首頁進度已更新。" : ""}`
+        : `「${file.name}」未辨識到有效預查編號，請人工輸入。`,
+    });
+  };
   const addFiles = (key: SlotKey, incoming: FileList | null) => {
     if (!incoming?.length) return;
     const multiple = slots.find((slot) => slot.key === key)?.multiple;
     const next = Array.from(incoming).filter(
       (file) =>
         supported(file) &&
-        (key !== "identity" || ["pdf", "jpg", "jpeg", "png"].includes(ext(file))),
+        (!["identity", "name_reservation"].includes(key) ||
+          ["pdf", "jpg", "jpeg", "png"].includes(ext(file))),
     );
     if (!next.length) return;
     const selected = multiple ? [...files[key], ...next] : next.slice(0, 1);
@@ -575,6 +747,16 @@ export default function Home() {
       applyIdentitySelection(identityResults);
       for (const file of selected)
         if (!identityResults[fileId(file)]) void processIdentityFile(file, run);
+    }
+    if (key === "name_reservation") {
+      const file = selected[0];
+      activePrecheckFile.current = fileId(file);
+      const run = ++precheckRun.current;
+      setPrecheckRecognition({
+        state: "processing",
+        message: "名稱預查核定書辨識中。",
+      });
+      void processPrecheckFile(file, run);
     }
   };
   const drop = (event: DragEvent<HTMLDivElement>, key: SlotKey) => {
@@ -608,6 +790,18 @@ export default function Home() {
       });
       for (const file of nextFiles)
         if (!identityResults[fileId(file)]) void processIdentityFile(file, run);
+      return;
+    }
+    if (slot === "name_reservation") {
+      const id = fileId(removed);
+      activePrecheckFile.current = "";
+      precheckRun.current += 1;
+      setPrecheckRecognition({ state: "idle", message: "" });
+      setExtractions((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
       return;
     }
     if (slot !== "address_bundle") return;
@@ -874,6 +1068,7 @@ export default function Home() {
   };
 
   const openWizard = (item: { id: number; companyName: string }) => {
+    stageUpdatedCases.current.delete(item.id);
     setActiveCaseId(item.id);
     setForm({
       company: item.companyName,
@@ -894,6 +1089,7 @@ export default function Home() {
     setExtractions({});
     setIdentityResults({});
     setIdentityRecognition({ state: "idle", message: "" });
+    setPrecheckRecognition({ state: "idle", message: "" });
     setAddressCandidates([]);
     setSelectedCandidate("");
     setDetectionDecisions({});
@@ -903,6 +1099,15 @@ export default function Home() {
     identityRun.current += 1;
     identityManual.current = { representative: false, nationalId: false };
     lastAutoIdentity.current = { representative: "", nationalId: "" };
+    activePrecheckFile.current = "";
+    precheckRun.current += 1;
+    precheckManual.current = {
+      company: false,
+      precheck: false,
+      approval: false,
+      expiry: false,
+      business: false,
+    };
     addressManual.current = false;
     setStep(1);
     setView("wizard");
@@ -1025,7 +1230,7 @@ export default function Home() {
                           type="file"
                           multiple={slot.multiple}
                           accept={
-                            slot.key === "identity"
+                            ["identity", "name_reservation"].includes(slot.key)
                               ? ".pdf,.jpg,.jpeg,.png"
                               : ".pdf,.jpg,.jpeg,.png,.doc,.docx"
                           }
@@ -1058,7 +1263,8 @@ export default function Home() {
                                 {ext(file).toUpperCase()}・{fileSize(file.size)}
                               </span>
                               {(slot.key === "address_bundle" ||
-                                slot.key === "identity") &&
+                                slot.key === "identity" ||
+                                slot.key === "name_reservation") &&
                                 extractions[fileId(file)] && (
                                   <small
                                     className={`extraction-status ${extractions[fileId(file)].status}`}
@@ -1101,6 +1307,15 @@ export default function Home() {
                             aria-live="polite"
                           >
                             {identityRecognition.message}
+                          </p>
+                        )}
+                      {slot.key === "name_reservation" &&
+                        precheckRecognition.state !== "idle" && (
+                          <p
+                            className={`recognition-note precheck-${precheckRecognition.state}`}
+                            aria-live="polite"
+                          >
+                            {precheckRecognition.message}
                           </p>
                         )}
                     </div>
@@ -1241,10 +1456,11 @@ export default function Home() {
             <div className="stage-actions-right">
               <button
                 className="primary"
-                disabled={
-                  processingAddress ||
-                  identityRecognition.state === "processing"
-                }
+              disabled={
+                processingAddress ||
+                identityRecognition.state === "processing" ||
+                precheckRecognition.state === "processing"
+              }
                 onClick={() => setStep(2)}
               >
                 下一步：確認資料
@@ -1291,6 +1507,13 @@ export default function Home() {
                       identityManual.current.representative = true;
                     if (key === "nationalId")
                       identityManual.current.nationalId = true;
+                    if (
+                      key === "company" ||
+                      key === "precheck" ||
+                      key === "approval" ||
+                      key === "expiry"
+                    )
+                      precheckManual.current[key] = true;
                     setForm((current) => ({
                       ...current,
                       [key]: event.target.value,
@@ -1352,21 +1575,23 @@ export default function Home() {
               <div className="business-list" key={`${index}-${item}`}>
                 <input
                   value={item}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    precheckManual.current.business = true;
                     setBusiness((current) =>
                       current.map((entry, i) =>
                         i === index ? event.target.value : entry,
                       ),
-                    )
-                  }
+                    );
+                  }}
                 />
                 <button
                   className="secondary small"
-                  onClick={() =>
+                  onClick={() => {
+                    precheckManual.current.business = true;
                     setBusiness((current) =>
                       current.filter((_, i) => i !== index),
-                    )
-                  }
+                    );
+                  }}
                 >
                   刪除
                 </button>
@@ -1374,7 +1599,10 @@ export default function Home() {
             ))}
             <button
               className="secondary small"
-              onClick={() => setBusiness((current) => [...current, ""])}
+              onClick={() => {
+                precheckManual.current.business = true;
+                setBusiness((current) => [...current, ""]);
+              }}
             >
               新增營業項目
             </button>

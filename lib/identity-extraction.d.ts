@@ -5,3 +5,6 @@ export function isPlausibleTaiwanName(value: string): boolean;
 export function parseTaiwanIdentityText(pagesOrText: string | { text?: string }[]): ParsedIdentity;
 export function selectIdentityResult(orderedFileIds: string[], results: Record<string, ParsedIdentity>): ({ state: "processing" | "review" } | ({ state: "success" | "partial" } & ParsedIdentity));
 export function mergeIdentityFields<T extends { representative: string; nationalId: string }>(current: T, parsed: Partial<ParsedIdentity> | undefined, manual: { representative: boolean; nationalId: boolean }): T;
+export function isCompleteIdentityResult(value: Partial<ParsedIdentity> | null | undefined): boolean;
+export function selectRotationCandidate<T extends Partial<ParsedIdentity>>(candidates: T[]): T | null;
+export function identityCropCandidates(width: number, height: number): { key: string; x: number; y: number; width: number; height: number }[];

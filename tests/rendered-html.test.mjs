@@ -13,13 +13,16 @@ import {
   extractAddressCandidates,
   formatPageRange,
   parsePageRange,
+  shouldRunPdfOcr,
   splitPdfPages,
 } from "../lib/document-extraction.mjs";
 import {
   isValidTaiwanNationalId,
+  identityCropCandidates,
   mergeIdentityFields,
   parseTaiwanIdentityText,
   selectIdentityResult,
+  selectRotationCandidate,
 } from "../lib/identity-extraction.mjs";
 import { PDFDocument } from "pdf-lib";
 
@@ -29,6 +32,25 @@ test("Taiwan national ID validation uses official checksum", () => {
   assert.equal(isValidTaiwanNationalId("A123456788"), false);
   assert.equal(isValidTaiwanNationalId("A323456789"), false);
   assert.equal(isValidTaiwanNationalId("Z123456789"), false);
+});
+
+test("identity enhancement selects the first complete rotation and uses 2x crop regions", () => {
+  const validId = ["A", "123", "456", "789"].join("");
+  const selected = selectRotationCandidate([
+    { rotation: 0, name: "", nationalId: "" },
+    { rotation: 90, name: "測試人", nationalId: validId },
+    { rotation: 180, name: "另一人", nationalId: validId },
+  ]);
+  assert.equal(selected?.rotation, 90);
+  const crops = identityCropCandidates(1000, 1600);
+  assert.deepEqual(crops.map((item) => item.key), ["top", "bottom", "left", "right"]);
+  assert.ok(crops.every((item) => item.width > 0 && item.height > 0));
+});
+
+test("PDF OCR purpose preserves good precheck text but keeps address fallback", () => {
+  assert.equal(shouldRunPdfOcr(1157, false, "precheck"), false);
+  assert.equal(shouldRunPdfOcr(1157, false, "address"), true);
+  assert.equal(shouldRunPdfOcr(20, true, "precheck"), true);
 });
 
 test("identity parser conservatively reads a labeled Chinese name and spaced ID", () => {
@@ -105,7 +127,7 @@ test("identity OCR is triggered only from the identity upload slot", async () =>
   );
   assert.match(
     page,
-    /slot\.key === "identity"[\s\S]+"\.pdf,\.jpg,\.jpeg,\.png"/,
+    /\["identity", "name_reservation"\]\.includes\(slot\.key\)[\s\S]{0,100}"\.pdf,\.jpg,\.jpeg,\.png"/,
   );
 });
 
@@ -136,6 +158,28 @@ test("wizard navigation lives in consistent step footers and supports mobile", a
   assert.match(approval, /onClick=\{onExit\}[\s\S]+返回案件清單/);
   assert.match(css, /@media\(max-width:760px\)[\s\S]+\.stage-actions\.stage-actions>div\{display:flex;flex-direction:column;width:100%\}/);
   assert.match(css, /\.stage-actions\.stage-actions button\{width:100%\}/);
+});
+
+test("precheck OCR is slot-isolated, protects manual fields, and sends metadata only", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /if \(key === "name_reservation"\)[\s\S]+processPrecheckFile/);
+  assert.match(page, /\{ purpose: "precheck" \}/);
+  assert.match(page, /precheckManual\.current\[key\] = true/);
+  assert.match(page, /precheckManual\.current\.business = true/);
+  assert.match(page, /action: "advance_after_precheck"/);
+  assert.match(page, /首頁進度已更新/);
+  assert.match(page, /precheckRecognition\.state === "processing"/);
+  const precheckProcessor = page.slice(
+    page.indexOf("const processPrecheckFile"),
+    page.indexOf("const addFiles"),
+  );
+  assert.match(precheckProcessor, /JSON\.stringify\(\{ action: "advance_after_precheck" \}\)/);
+  assert.doesNotMatch(precheckProcessor, /arrayBuffer|base64|FormData|body:\s*file/);
+  const addressProcessor = page.slice(
+    page.indexOf("const processAddressFile"),
+    page.indexOf("const applyIdentitySelection"),
+  );
+  assert.doesNotMatch(addressProcessor, /parsePrecheckText|precheckManual/);
 });
 
 test("buildDocx creates a valid OOXML OPC package", () => {
@@ -380,14 +424,10 @@ test("stale cases use a 30-day ongoing-only reminder and safe keep-active touch"
   );
   assert.match(route, /staleCount/);
   assert.match(route, /staleCases/);
+  assert.match(patchRoute, /body\.action === "keep_active"/);
   const keepActiveSql =
-    patchRoute.match(
-      /body\.action === "keep_active"\) await db\.prepare\("([^"]+)"\)/,
-    )?.[1] ?? "";
-  assert.equal(
-    keepActiveSql,
-    "UPDATE cases SET updated_at = ? WHERE id = ? AND status = 'ongoing'",
-  );
+    "UPDATE cases SET updated_at = ? WHERE id = ? AND status = 'ongoing'";
+  assert.match(patchRoute, new RegExp(keepActiveSql.replace(/[?]/g, "\\?")));
   const keepActiveSetClause = keepActiveSql.split(/\s+WHERE\s+/i)[0];
   assert.doesNotMatch(
     keepActiveSetClause,

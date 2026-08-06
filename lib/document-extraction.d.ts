@@ -8,4 +8,6 @@ export function formatPageRange(pageNumbers: number[]): string;
 export function parsePageRange(value: string, pageCount: number): number[];
 export function splitPdfPages(bytes: Uint8Array, pageRange: string, pageCount: number): Promise<Uint8Array>;
 export function collectPageTexts(pageCount: number, extractPageText: (page: number) => Promise<string>): Promise<{ page: number; text: string }[]>;
-export function extractDocument(file: File, onUpdate?: (state: { status: string; progress: number; method: string; message: string }) => void): Promise<ExtractionResult>;
+export function shouldRunPdfOcr(textLength: number, hasAddressCandidate: boolean, purpose?: "address" | "identity" | "precheck" | "generic"): boolean;
+export function extractDocument(file: File, onUpdate?: (state: { status: string; progress: number; method: string; message: string }) => void, options?: { purpose?: "address" | "identity" | "precheck" | "generic" }): Promise<ExtractionResult>;
+export function enhanceIdentityDocument(file: File, initialPages?: { page: number; text: string }[], onUpdate?: (state: { status: string; progress: number; method: string; message: string }) => void): Promise<{ name: string; nationalId: string; rotation: number; strategy: string }>;
