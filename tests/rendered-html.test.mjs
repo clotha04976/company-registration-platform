@@ -15,7 +15,99 @@ import {
   parsePageRange,
   splitPdfPages,
 } from "../lib/document-extraction.mjs";
+import {
+  isValidTaiwanNationalId,
+  mergeIdentityFields,
+  parseTaiwanIdentityText,
+  selectIdentityResult,
+} from "../lib/identity-extraction.mjs";
 import { PDFDocument } from "pdf-lib";
+
+test("Taiwan national ID validation uses official checksum", () => {
+  assert.equal(isValidTaiwanNationalId("A123456789"), true);
+  assert.equal(isValidTaiwanNationalId("A 1 2 8 0 8 2 7 3 4"), true);
+  assert.equal(isValidTaiwanNationalId("A123456788"), false);
+  assert.equal(isValidTaiwanNationalId("A323456789"), false);
+  assert.equal(isValidTaiwanNationalId("Z123456789"), false);
+});
+
+test("identity parser conservatively reads a labeled Chinese name and spaced ID", () => {
+  assert.deepEqual(
+    parseTaiwanIdentityText([
+      {
+        text: "中華民國國民身分證\n姓 名：林 彥 丞\n國籍 中華民國\n身分證字號 A 1 2 3 4 5 6 7 8 9\n出生日期 民國80年",
+      },
+    ]),
+    { name: "林彥丞", nationalId: "A123456789" },
+  );
+  assert.deepEqual(
+    parseTaiwanIdentityText("姓名\n黃 郁 庭\n戶籍地址：台北市中正區\nA123456788"),
+    { name: "黃郁庭", nationalId: "" },
+  );
+  assert.equal(
+    parseTaiwanIdentityText("戶籍地址：姓名路一段\n國籍：中華民國\n出生日期：80年").name,
+    "",
+  );
+});
+
+test("identity selection waits for all files then uses the first complete file", () => {
+  const first = { sourceFile: "正面-1.jpg", name: "林彥丞", nationalId: "A123456789" };
+  const second = { sourceFile: "正面-2.jpg", name: "黃郁庭", nationalId: "A123456789" };
+  assert.deepEqual(selectIdentityResult(["one", "two"], { two: second }), {
+    state: "processing",
+  });
+  assert.deepEqual(
+    selectIdentityResult(["one", "two"], { one: first, two: second }),
+    { state: "success", ...first },
+  );
+});
+
+test("identity merge never overwrites manually edited fields", () => {
+  const current = { representative: "手動姓名", nationalId: "A123456789", company: "鼎泰結構有限公司" };
+  assert.deepEqual(
+    mergeIdentityFields(
+      current,
+      { name: "林彥丞", nationalId: "A123456789" },
+      { representative: true, nationalId: true },
+    ),
+    current,
+  );
+  assert.deepEqual(
+    mergeIdentityFields(
+      { ...current, representative: "" },
+      { name: "林彥丞", nationalId: "A123456788" },
+      { representative: false, nationalId: false },
+    ),
+    { ...current, representative: "林彥丞" },
+  );
+});
+
+test("identity OCR is triggered only from the identity upload slot", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /if \(key === "identity"\)[\s\S]+processIdentityFile/);
+  assert.match(page, /parseTaiwanIdentityText\(result\.pages\)/);
+  const addressProcessor = page.slice(
+    page.indexOf("const processAddressFile"),
+    page.indexOf("const applyIdentitySelection"),
+  );
+  assert.doesNotMatch(addressProcessor, /parseTaiwanIdentityText|nationalId|representative/);
+  for (const message of [
+    "身分證辨識中",
+    "身分證辨識完成後才能繼續",
+    "請至下一步確認",
+    "未辨識到有效的姓名與身分證字號",
+    "已採用",
+  ])
+    assert.match(page, new RegExp(message));
+  assert.match(
+    page,
+    /processingAddress \|\| identityRecognition\.state === "processing"/,
+  );
+  assert.match(
+    page,
+    /slot\.key === "identity"[\s\S]+"\.pdf,\.jpg,\.jpeg,\.png"/,
+  );
+});
 
 test("buildDocx creates a valid OOXML OPC package", () => {
   const bytes = buildDocx("股東同意書", [
@@ -374,7 +466,10 @@ test("client extraction uses real lazy PDF and OCR engines with truthful UI stat
     "registrationAddress: top.address",
   ])
     assert.match(page, new RegExp(text));
-  assert.match(page, /disabled=\{processingAddress\}/);
+  assert.match(
+    page,
+    /disabled=\{[\s\S]*processingAddress \|\| identityRecognition\.state === "processing"[\s\S]*\}/,
+  );
   assert.match(page, /addressManual\.current = true/);
 });
 

@@ -23,6 +23,11 @@ import {
   parsePageRange,
   splitPdfPages,
 } from "../lib/document-extraction.mjs";
+import {
+  mergeIdentityFields,
+  parseTaiwanIdentityText,
+  selectIdentityResult,
+} from "../lib/identity-extraction.mjs";
 import CasesDashboard from "./cases-dashboard";
 import ApprovalTracking from "./approval-tracking";
 
@@ -77,6 +82,15 @@ type FileExtractionState = {
   method: string;
   message: string;
   result?: ExtractionResult;
+};
+type IdentityResult = {
+  name: string;
+  nationalId: string;
+  sourceFile: string;
+};
+type IdentityRecognition = {
+  state: "idle" | "processing" | "success" | "partial" | "review";
+  message: string;
 };
 type GeneratedKey =
   "registration_form" | "articles" | "shareholder" | "director" | "aml";
@@ -321,6 +335,11 @@ export default function Home() {
   const [extractions, setExtractions] = useState<
     Record<string, FileExtractionState>
   >({});
+  const [identityResults, setIdentityResults] = useState<
+    Record<string, IdentityResult>
+  >({});
+  const [identityRecognition, setIdentityRecognition] =
+    useState<IdentityRecognition>({ state: "idle", message: "" });
   const [addressCandidates, setAddressCandidates] = useState<
     AddressCandidate[]
   >([]);
@@ -333,6 +352,10 @@ export default function Home() {
   >({});
   const addressManual = useRef(false);
   const activeAddressFiles = useRef(new Set<string>());
+  const activeIdentityFiles = useRef<string[]>([]);
+  const identityRun = useRef(0);
+  const identityManual = useRef({ representative: false, nationalId: false });
+  const lastAutoIdentity = useRef({ representative: "", nationalId: "" });
   const refs = useRef<Record<SlotKey, HTMLInputElement | null>>(
     {} as Record<SlotKey, HTMLInputElement | null>,
   );
@@ -395,15 +418,163 @@ export default function Home() {
     }));
     applyCandidates(file.name, result.candidates);
   };
+  const applyIdentitySelection = (
+    nextResults: Record<string, IdentityResult>,
+  ) => {
+    const selected = selectIdentityResult(
+      activeIdentityFiles.current,
+      nextResults,
+    );
+    if (!activeIdentityFiles.current.length) {
+      setIdentityRecognition({ state: "idle", message: "" });
+      const previous = lastAutoIdentity.current;
+      setForm((current) => ({
+        ...current,
+        representative:
+          !identityManual.current.representative &&
+          current.representative === previous.representative
+            ? ""
+            : current.representative,
+        nationalId:
+          !identityManual.current.nationalId &&
+          current.nationalId === previous.nationalId
+            ? ""
+            : current.nationalId,
+      }));
+      lastAutoIdentity.current = { representative: "", nationalId: "" };
+      return;
+    }
+    if (selected.state === "processing") {
+      setIdentityRecognition({
+        state: "processing",
+        message: "身分證辨識中，完成後會自動帶入下一步。",
+      });
+      return;
+    }
+    const parsed = selected.state === "review" ? undefined : selected;
+    const previous = lastAutoIdentity.current;
+    setForm((current) => {
+      const merged = mergeIdentityFields(current, parsed, identityManual.current);
+      return {
+        ...merged,
+        representative:
+          !identityManual.current.representative &&
+          !parsed?.name &&
+          current.representative === previous.representative
+            ? ""
+            : merged.representative,
+        nationalId:
+          !identityManual.current.nationalId &&
+          !parsed?.nationalId &&
+          current.nationalId === previous.nationalId
+            ? ""
+            : merged.nationalId,
+      };
+    });
+    lastAutoIdentity.current = {
+      representative:
+        identityManual.current.representative || !parsed?.name
+          ? previous.representative
+          : parsed.name,
+      nationalId:
+        identityManual.current.nationalId || !parsed?.nationalId
+          ? previous.nationalId
+          : parsed.nationalId,
+    };
+    if (selected.state === "success")
+      setIdentityRecognition({
+        state: "success",
+        message: `已採用「${selected.sourceFile}」辨識姓名與身分證字號，請至下一步確認。`,
+      });
+    else if (selected.state === "partial")
+      setIdentityRecognition({
+        state: "partial",
+        message: `「${selected.sourceFile}」只辨識到部分資料，未辨識欄位請人工輸入；既有手動資料不會被覆蓋。`,
+      });
+    else
+      setIdentityRecognition({
+        state: "review",
+        message: "未辨識到有效的姓名與身分證字號，請於下一步人工輸入。",
+      });
+  };
+  const processIdentityFile = async (file: File, run: number) => {
+    const id = fileId(file);
+    setExtractions((current) => ({
+      ...current,
+      [id]: {
+        status: "pending",
+        progress: 0,
+        method: "等待處理",
+        message: "準備在瀏覽器內辨識身分證",
+      },
+    }));
+    const result = await runExtraction(file, (update) => {
+      if (
+        run !== identityRun.current ||
+        !activeIdentityFiles.current.includes(id)
+      )
+        return;
+      setExtractions((current) => ({
+        ...current,
+        [id]: {
+          status: update.status as ExtractionStatus,
+          progress: update.progress,
+          method: update.method,
+          message: update.message,
+        },
+      }));
+    });
+    if (
+      run !== identityRun.current ||
+      !activeIdentityFiles.current.includes(id)
+    )
+      return;
+    const parsed = parseTaiwanIdentityText(result.pages);
+    const identity = { ...parsed, sourceFile: file.name };
+    setExtractions((current) => ({
+      ...current,
+      [id]: {
+        status: parsed.name && parsed.nationalId ? "success" : "review",
+        progress: 100,
+        method: result.method,
+        message:
+          parsed.name && parsed.nationalId
+            ? "已辨識姓名與有效身分證字號，請確認"
+            : "未完整辨識，請人工輸入",
+        result,
+      },
+    }));
+    setIdentityResults((current) => {
+      const next = { ...current, [id]: identity };
+      applyIdentitySelection(next);
+      return next;
+    });
+  };
   const addFiles = (key: SlotKey, incoming: FileList | null) => {
     if (!incoming?.length) return;
     const multiple = slots.find((slot) => slot.key === key)?.multiple;
-    const next = Array.from(incoming).filter(supported);
+    const next = Array.from(incoming).filter(
+      (file) =>
+        supported(file) &&
+        (key !== "identity" || ["pdf", "jpg", "jpeg", "png"].includes(ext(file))),
+    );
+    if (!next.length) return;
     const selected = multiple ? [...files[key], ...next] : next.slice(0, 1);
     setFiles((current) => ({ ...current, [key]: selected }));
     if (key === "address_bundle") {
       activeAddressFiles.current = new Set(selected.map(fileId));
       for (const file of next) void processAddressFile(file);
+    }
+    if (key === "identity") {
+      activeIdentityFiles.current = selected.map(fileId);
+      const run = ++identityRun.current;
+      setIdentityRecognition({
+        state: "processing",
+        message: "身分證辨識中，完成後會自動帶入下一步。",
+      });
+      applyIdentitySelection(identityResults);
+      for (const file of selected)
+        if (!identityResults[fileId(file)]) void processIdentityFile(file, run);
     }
   };
   const drop = (event: DragEvent<HTMLDivElement>, key: SlotKey) => {
@@ -419,7 +590,27 @@ export default function Home() {
     const removed = files[slot][index];
     const nextFiles = files[slot].filter((_, itemIndex) => itemIndex !== index);
     setFiles((current) => ({ ...current, [slot]: nextFiles }));
-    if (slot !== "address_bundle" || !removed) return;
+    if (!removed) return;
+    if (slot === "identity") {
+      const id = fileId(removed);
+      activeIdentityFiles.current = nextFiles.map(fileId);
+      const run = ++identityRun.current;
+      setExtractions((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
+      setIdentityResults((current) => {
+        const next = { ...current };
+        delete next[id];
+        applyIdentitySelection(next);
+        return next;
+      });
+      for (const file of nextFiles)
+        if (!identityResults[fileId(file)]) void processIdentityFile(file, run);
+      return;
+    }
+    if (slot !== "address_bundle") return;
     const id = fileId(removed);
     activeAddressFiles.current.delete(id);
     setExtractions((current) => {
@@ -701,11 +892,17 @@ export default function Home() {
     setBusiness([]);
     setFiles(emptyFiles());
     setExtractions({});
+    setIdentityResults({});
+    setIdentityRecognition({ state: "idle", message: "" });
     setAddressCandidates([]);
     setSelectedCandidate("");
     setDetectionDecisions({});
     setDetectionPageRanges({});
     activeAddressFiles.current = new Set();
+    activeIdentityFiles.current = [];
+    identityRun.current += 1;
+    identityManual.current = { representative: false, nationalId: false };
+    lastAutoIdentity.current = { representative: "", nationalId: "" };
     addressManual.current = false;
     setStep(1);
     setView("wizard");
@@ -833,10 +1030,15 @@ export default function Home() {
                           }}
                           type="file"
                           multiple={slot.multiple}
-                          accept=".pdf,.jpg,.jpeg,.png,.doc,.docx"
-                          onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                            addFiles(slot.key, event.target.files)
+                          accept={
+                            slot.key === "identity"
+                              ? ".pdf,.jpg,.jpeg,.png"
+                              : ".pdf,.jpg,.jpeg,.png,.doc,.docx"
                           }
+                          onChange={(event: ChangeEvent<HTMLInputElement>) => {
+                            addFiles(slot.key, event.target.files);
+                            event.target.value = "";
+                          }}
                         />
                         <button
                           className="secondary small"
@@ -861,7 +1063,8 @@ export default function Home() {
                               <span>
                                 {ext(file).toUpperCase()}・{fileSize(file.size)}
                               </span>
-                              {slot.key === "address_bundle" &&
+                              {(slot.key === "address_bundle" ||
+                                slot.key === "identity") &&
                                 extractions[fileId(file)] && (
                                   <small
                                     className={`extraction-status ${extractions[fileId(file)].status}`}
@@ -897,6 +1100,15 @@ export default function Home() {
                           <small className="pending">尚未上傳</small>
                         )}
                       </div>
+                      {slot.key === "identity" &&
+                        identityRecognition.state !== "idle" && (
+                          <p
+                            className={`recognition-note identity-${identityRecognition.state}`}
+                            aria-live="polite"
+                          >
+                            {identityRecognition.message}
+                          </p>
+                        )}
                     </div>
                   ))}
               </section>
@@ -1019,9 +1231,16 @@ export default function Home() {
             </section>
           )}
           <footer className="stage-actions">
+            {identityRecognition.state === "processing" && (
+              <small className="recognition-note" aria-live="polite">
+                身分證辨識完成後才能繼續
+              </small>
+            )}
             <button
               className="primary"
-              disabled={processingAddress}
+              disabled={
+                processingAddress || identityRecognition.state === "processing"
+              }
               onClick={() => setStep(2)}
             >
               下一步：確認資料
@@ -1063,6 +1282,10 @@ export default function Home() {
                   onChange={(event) => {
                     if (key === "registrationAddress")
                       addressManual.current = true;
+                    if (key === "representative")
+                      identityManual.current.representative = true;
+                    if (key === "nationalId")
+                      identityManual.current.nationalId = true;
                     setForm((current) => ({
                       ...current,
                       [key]: event.target.value,
