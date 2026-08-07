@@ -823,13 +823,23 @@ export default function Home() {
     if (key === "identity") {
       activeIdentityFiles.current = selected.map(fileId);
       const run = ++identityRun.current;
+      const incomingIds = new Set(next.map(fileId));
       setIdentityRecognition({
         state: "processing",
         message: "身分證辨識中，完成後會自動帶入下一步。",
       });
-      applyIdentitySelection(identityResults);
-      for (const file of selected)
-        if (!identityResults[fileId(file)]) void processIdentityFile(file, run);
+      setExtractions((current) => {
+        const refreshed = { ...current };
+        for (const id of incomingIds) delete refreshed[id];
+        return refreshed;
+      });
+      setIdentityResults((current) => {
+        const refreshed = { ...current };
+        for (const id of incomingIds) delete refreshed[id];
+        applyIdentitySelection(refreshed);
+        return refreshed;
+      });
+      for (const file of next) void processIdentityFile(file, run);
     }
     if (key === "name_reservation") {
       const file = selected[0];

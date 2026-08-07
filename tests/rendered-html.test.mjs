@@ -178,6 +178,10 @@ test("identity OCR is triggered only from the identity upload slot", async () =>
   assert.match(page, /lookupTaiwanPostalCode\(serviceResult\.address\)/);
   assert.match(page, /建議確認地址正確後，手動刪除「里、鄰」資料/);
   assert.match(page, /zip5\.5432\.tw/);
+  assert.match(
+    page,
+    /const incomingIds = new Set\(next\.map\(fileId\)\)[\s\S]+for \(const id of incomingIds\) delete refreshed\[id\][\s\S]+for \(const file of next\) void processIdentityFile/,
+  );
 });
 
 test("wizard navigation lives in consistent step footers and supports mobile", async () => {
