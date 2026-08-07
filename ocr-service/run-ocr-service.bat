@@ -2,8 +2,26 @@
 setlocal
 cd /d "%~dp0"
 
+set "PYTHON_LAUNCHER="
+py -3.11 --version >nul 2>&1
+if not errorlevel 1 set "PYTHON_LAUNCHER=py -3.11"
+
+if not defined PYTHON_LAUNCHER (
+  py -3.10 --version >nul 2>&1
+  if not errorlevel 1 set "PYTHON_LAUNCHER=py -3.10"
+)
+
+if not defined PYTHON_LAUNCHER (
+  echo Python 3.10 or 3.11 was not found.
+  echo Please install Python 3.10 or 3.11 and try again.
+  goto :error
+)
+
+echo Using Python:
+call %PYTHON_LAUNCHER% --version
+
 if not exist ".venv\Scripts\python.exe" (
-  py -3.11 -m venv .venv
+  call %PYTHON_LAUNCHER% -m venv .venv
   if errorlevel 1 goto :error
   call .venv\Scripts\python.exe -m pip install --upgrade pip
   if errorlevel 1 goto :error

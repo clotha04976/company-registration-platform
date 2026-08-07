@@ -4,6 +4,9 @@ FastAPI sidecar for local or private-network identity-card recognition. Uploads 
 
 ## Run locally
 
+`run-ocr-service.bat` supports Python 3.10 and 3.11. It prefers 3.11 when both
+are installed and automatically falls back to 3.10.
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -r requirements.txt
