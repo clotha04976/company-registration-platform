@@ -28,10 +28,8 @@ import {
   selectIdentityResult,
 } from "../lib/identity-extraction.mjs";
 import { parsePrecheckText } from "../lib/precheck-extraction.mjs";
-import {
-  IdentityUploadSide,
-  recognizeIdentityWithService,
-} from "../lib/identity-service.mjs";
+import { recognizeIdentityWithService } from "../lib/identity-service.mjs";
+import { lookupTaiwanPostalCode } from "../lib/postal-code.mjs";
 import CasesDashboard from "./cases-dashboard";
 import ApprovalTracking from "./approval-tracking";
 
@@ -42,6 +40,7 @@ type SlotKey =
   | "address_bundle"
   | "capital_verification"
   | "other";
+type IdentityUploadSide = "auto" | "front" | "back" | "combined";
 type Slot = {
   key: SlotKey;
   phase: "名稱預查階段" | "名稱核准後・市政府設立階段";
@@ -93,6 +92,7 @@ type IdentityResult = {
   sourceFile: string;
   birthDate?: string;
   address?: string;
+  contactPostalCode?: string;
   nationalIdSource?: string;
 };
 type IdentityRecognition = {
@@ -381,12 +381,14 @@ export default function Home() {
     nationalId: false,
     birthDate: false,
     contactAddress: false,
+    contactPostalCode: false,
   });
   const lastAutoIdentity = useRef({
     representative: "",
     nationalId: "",
     birthDate: "",
     contactAddress: "",
+    contactPostalCode: "",
   });
   const identityFileSides = useRef<Record<string, IdentityUploadSide>>({});
   const activePrecheckFile = useRef("");
@@ -498,12 +500,18 @@ export default function Home() {
           current.contactAddress === previous.contactAddress
             ? ""
             : current.contactAddress,
+        contactPostalCode:
+          !identityManual.current.contactPostalCode &&
+          current.contactPostalCode === previous.contactPostalCode
+            ? ""
+            : current.contactPostalCode,
       }));
       lastAutoIdentity.current = {
         representative: "",
         nationalId: "",
         birthDate: "",
         contactAddress: "",
+        contactPostalCode: "",
       };
       return;
     }
@@ -540,6 +548,10 @@ export default function Home() {
           identityManual.current.contactAddress || !parsed?.address
             ? current.contactAddress
             : parsed.address,
+        contactPostalCode:
+          identityManual.current.contactPostalCode || !parsed?.contactPostalCode
+            ? current.contactPostalCode
+            : parsed.contactPostalCode,
       };
     });
     lastAutoIdentity.current = {
@@ -559,6 +571,10 @@ export default function Home() {
         identityManual.current.contactAddress || !parsed?.address
           ? previous.contactAddress
           : parsed.address,
+      contactPostalCode:
+        identityManual.current.contactPostalCode || !parsed?.contactPostalCode
+          ? previous.contactPostalCode
+          : parsed.contactPostalCode,
     };
     if (selected.state === "success")
       setIdentityRecognition({
@@ -597,11 +613,20 @@ export default function Home() {
         !activeIdentityFiles.current.includes(id)
       )
         return;
+      const resolvedContactPostalCode = serviceResult.address
+        ? await lookupTaiwanPostalCode(serviceResult.address)
+        : "";
+      if (
+        run !== identityRun.current ||
+        !activeIdentityFiles.current.includes(id)
+      )
+        return;
       const identity: IdentityResult = {
         name: serviceResult.name,
         nationalId: serviceResult.nationalId,
         birthDate: serviceResult.birthDate,
         address: serviceResult.address,
+        contactPostalCode: resolvedContactPostalCode,
         nationalIdSource: serviceResult.nationalIdSource,
         sourceFile: file.name,
       };
@@ -1166,12 +1191,14 @@ export default function Home() {
       nationalId: false,
       birthDate: false,
       contactAddress: false,
+      contactPostalCode: false,
     };
     lastAutoIdentity.current = {
       representative: "",
       nationalId: "",
       birthDate: "",
       contactAddress: "",
+      contactPostalCode: "",
     };
     identityFileSides.current = {};
     activePrecheckFile.current = "";
@@ -1620,6 +1647,8 @@ export default function Home() {
                       identityManual.current.birthDate = true;
                     if (key === "contactAddress")
                       identityManual.current.contactAddress = true;
+                    if (key === "contactPostalCode")
+                      identityManual.current.contactPostalCode = true;
                     if (
                       key === "company" ||
                       key === "precheck" ||
@@ -1633,6 +1662,24 @@ export default function Home() {
                     }));
                   }}
                 />
+                {key === "contactAddress" && form.contactAddress && (
+                  <small className="field-hint address-edit-hint">
+                    建議確認地址正確後，手動刪除「里、鄰」資料。
+                  </small>
+                )}
+                {key === "contactPostalCode" && (
+                  <small className="field-hint">
+                    郵遞區號由{" "}
+                    <a
+                      href="https://zip5.5432.tw"
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      zip5.5432.tw
+                    </a>
+                    {" "}協助查詢，請人工確認。
+                  </small>
+                )}
                 {key === "registrationAddress" &&
                   addressCandidates.length > 0 && (
                     <div className="address-candidates">

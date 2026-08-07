@@ -1,4 +1,4 @@
-export type ParsedIdentity = { name: string; nationalId: string; sourceFile?: string; birthDate?: string; address?: string; nationalIdSource?: string };
+export type ParsedIdentity = { name: string; nationalId: string; sourceFile?: string; birthDate?: string; address?: string; contactPostalCode?: string; nationalIdSource?: string };
 export function normalizeTaiwanNationalId(value: string): string;
 export function isValidTaiwanNationalId(value: string): boolean;
 export function isPlausibleTaiwanName(value: string): boolean;

@@ -85,6 +85,7 @@ test("identity selection waits for all files then uses the first complete file",
       ...first,
       birthDate: "",
       address: "",
+      contactPostalCode: "",
       nationalIdSource: "",
     },
   );
@@ -117,6 +118,7 @@ test("identity selection merges front fields with back address and barcode fallb
       nationalId: "A123456789",
       birthDate: "080/05/06",
       address: "臺北市中正區測試路一段12號",
+      contactPostalCode: "",
       nationalIdSource: "",
     },
   );
@@ -173,6 +175,9 @@ test("identity OCR is triggered only from the identity upload slot", async () =>
     assert.match(page, new RegExp(label));
   assert.match(page, /runIdentityService\([\s\S]+identityFileSides\.current/);
   assert.match(page, /證號來自反面條碼/);
+  assert.match(page, /lookupTaiwanPostalCode\(serviceResult\.address\)/);
+  assert.match(page, /建議確認地址正確後，手動刪除「里、鄰」資料/);
+  assert.match(page, /zip5\.5432\.tw/);
 });
 
 test("wizard navigation lives in consistent step footers and supports mobile", async () => {

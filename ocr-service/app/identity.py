@@ -21,7 +21,8 @@ TAIWAN_ID_LETTER_VALUES = {
 
 NAME_EXCLUSIONS = {
     "中華民國", "國民身分證", "姓名", "出生日期", "發證日期", "父", "母",
-    "配偶", "役別", "出生地", "住址", "地址", "國籍",
+    "配偶", "役別", "出生地", "住址", "地址", "國籍", "年月日", "年月",
+    "年日", "月日", "性別", "性别女", "女性",
 }
 
 
@@ -103,6 +104,33 @@ def is_plausible_name(value: str) -> bool:
 
 
 def extract_name(tokens: list[OcrToken]) -> str:
+    anchors = [
+        token
+        for token in tokens
+        if any(label in token.text.replace(" ", "") for label in ("姓名", "姓 名"))
+    ]
+    for anchor in anchors:
+        compact = anchor.text.replace(" ", "")
+        suffix = re.sub(r"^.*?姓名[:：]?", "", compact)
+        suffix = re.sub(r"[^\u3400-\u9fff]", "", suffix)
+        same_line = sorted(
+            (
+                token
+                for token in tokens
+                if token is not anchor
+                and token.center_x > anchor.center_x
+                and abs(token.center_y - anchor.center_y)
+                <= max(anchor.height, token.height) * 0.9
+            ),
+            key=lambda token: token.center_x,
+        )
+        joined = suffix + "".join(
+            re.sub(r"[^\u3400-\u9fff]", "", token.text) for token in same_line
+        )
+        for length in range(min(4, len(joined)), 1, -1):
+            value = joined[:length]
+            if is_plausible_name(value):
+                return value
     for token in _near_label(tokens, ("姓名", "姓 名")):
         value = re.sub(r"[^\u3400-\u9fff]", "", token.text)[:4]
         if is_plausible_name(value):
@@ -142,8 +170,16 @@ def extract_birth_date(tokens: list[OcrToken]) -> str:
 def normalize_address(value: str) -> str:
     value = re.sub(r"\s+", "", value)
     value = re.sub(r"^(?:戶籍)?(?:住址|地址)[:：]?", "", value)
+    value = re.sub(r"\d{8,}$", "", value)
     value = value.replace("台北市", "臺北市").replace("台中市", "臺中市")
     value = value.replace("台南市", "臺南市").replace("台東縣", "臺東縣")
+    value = (
+        value.replace("县", "縣")
+        .replace("镇", "鎮")
+        .replace("乡", "鄉")
+        .replace("邻", "鄰")
+        .replace("号", "號")
+    )
     return re.sub(r"[，,。；;].*$", "", value).strip()
 
 
@@ -153,7 +189,16 @@ def extract_address(tokens: list[OcrToken]) -> str:
         if "住址" not in compact and "地址" not in compact:
             continue
         candidates = [re.sub(r"^.*?(?:住址|地址)[:：]?", "", compact)]
-        candidates.extend(item.text for item in tokens[index + 1:index + 4])
+        for item in tokens[index + 1:index + 7]:
+            item_compact = item.text.replace(" ", "")
+            if re.fullmatch(r"\d{8,}", item_compact):
+                break
+            if any(label in item_compact for label in ("父", "母", "配偶", "役別", "出生地")):
+                continue
+            candidates.append(item.text)
+            value = normalize_address("".join(candidates))
+            if "號" in value and len(value) >= 8:
+                break
         value = normalize_address("".join(candidates))
         if len(value) >= 8 and re.search(r"[縣市鄉鎮區路街巷弄號]", value):
             return value[:80]

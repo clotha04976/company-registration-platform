@@ -8,6 +8,7 @@ from app.identity import (
     detect_card_candidates,
     extract_address,
     extract_birth_date,
+    extract_name,
     extract_national_id,
     is_valid_national_id,
     normalize_roc_date,
@@ -35,6 +36,27 @@ class IdentityParsingTests(unittest.TestCase):
             OcrToken("一段12號3樓", 0.98, (60, 40, 180, 60)),
         ]
         self.assertEqual(extract_address(tokens), "臺北市中正區測試路一段12號3樓")
+
+    def test_extracts_name_split_across_front_tokens_and_rejects_date_heading(self):
+        tokens = [
+            OcrToken("姓名陳", 0.99, (112, 545, 481, 671)),
+            OcrToken("俞", 0.99, (668, 541, 805, 681)),
+            OcrToken("欣", 0.99, (987, 543, 1132, 680)),
+            OcrToken("年月日", 0.99, (123, 827, 321, 917)),
+        ]
+        self.assertEqual(extract_name(tokens), "陳俞欣")
+
+    def test_address_keeps_county_town_village_and_removes_barcode_digits(self):
+        tokens = [
+            OcrToken("住址", 0.99, (31, 118, 73, 142)),
+            OcrToken("南投縣竹山镇延祥里17鄰", 0.98, (70, 114, 240, 136)),
+            OcrToken("集山路三段301巷81弄62號", 0.98, (72, 130, 251, 151)),
+            OcrToken("0181691323", 0.99, (231, 196, 344, 217)),
+        ]
+        self.assertEqual(
+            extract_address(tokens),
+            "南投縣竹山鎮延祥里17鄰集山路三段301巷81弄62號",
+        )
 
     def test_detects_two_card_shaped_regions_on_a4(self):
         image = np.full((1400, 1000, 3), 255, np.uint8)
