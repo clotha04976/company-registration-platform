@@ -20,6 +20,13 @@ if not defined PYTHON_LAUNCHER (
 echo Using Python:
 call %PYTHON_LAUNCHER% --version
 
+powershell -NoProfile -Command "try { $health = Invoke-RestMethod -Uri 'http://127.0.0.1:8689/health' -TimeoutSec 3; if ($health.status -eq 'ok' -and $health.model -eq 'PP-OCRv6-small') { exit 0 }; exit 1 } catch { exit 1 }"
+if not errorlevel 1 (
+  echo OCR service is already running on http://127.0.0.1:8689.
+  echo Reusing the existing service.
+  goto :eof
+)
+
 if not exist ".venv\Scripts\python.exe" (
   call %PYTHON_LAUNCHER% -m venv .venv
   if errorlevel 1 goto :error
