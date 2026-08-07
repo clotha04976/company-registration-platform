@@ -92,6 +92,14 @@ actions tied to the current ChatGPT user. Leave public content anonymous.
 - `npm test`: build the starter and verify its rendered loading skeleton
 - `npm run db:generate`: generate Drizzle migrations after schema changes
 
+## Local identity OCR
+
+Double-click `start-website.bat` to start both the website and the local FastAPI OCR sidecar. The first run creates `ocr-service/.venv` and downloads the official PP-OCRv6 small models, so setup takes longer than later starts.
+
+The OCR service listens only on `127.0.0.1:8689`, processes uploads in memory, and does not retain identity-card images. Step 1 provides separate front, back, and combined A4 upload controls. Front recognition extracts name, checksum-validated national ID, and ROC birth date; back recognition extracts the address and uses the barcode as an ID fallback. If the service is unavailable, the website shows an explicit connection error instead of attempting unreliable browser OCR.
+
+For private-network deployment, point `NEXT_PUBLIC_IDENTITY_OCR_URL` at the HTTPS FastAPI endpoint and add the website origin to `OCR_ALLOWED_ORIGINS`. Do not expose the OCR service publicly without authentication and transport security.
+
 ## Learn More
 
 - [vinext Documentation](https://github.com/cloudflare/vinext)

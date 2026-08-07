@@ -1,0 +1,2 @@
+# Optional four-corner refinement. OpenCV perspective correction remains the fallback.
+docaligner_docsaid==1.1.1

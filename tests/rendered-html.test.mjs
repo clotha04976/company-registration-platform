@@ -80,7 +80,45 @@ test("identity selection waits for all files then uses the first complete file",
   });
   assert.deepEqual(
     selectIdentityResult(["one", "two"], { one: first, two: second }),
-    { state: "success", ...first },
+    {
+      state: "success",
+      ...first,
+      birthDate: "",
+      address: "",
+      nationalIdSource: "",
+    },
+  );
+});
+
+test("identity selection merges front fields with back address and barcode fallback", () => {
+  assert.deepEqual(
+    selectIdentityResult(
+      ["front", "back"],
+      {
+        front: {
+          sourceFile: "front.jpg",
+          name: "林彥丞",
+          nationalId: "A123456789",
+          birthDate: "080/05/06",
+        },
+        back: {
+          sourceFile: "back.jpg",
+          name: "",
+          nationalId: "A123456789",
+          nationalIdSource: "barcode",
+          address: "臺北市中正區測試路一段12號",
+        },
+      },
+    ),
+    {
+      state: "success",
+      sourceFile: "front.jpg",
+      name: "林彥丞",
+      nationalId: "A123456789",
+      birthDate: "080/05/06",
+      address: "臺北市中正區測試路一段12號",
+      nationalIdSource: "",
+    },
   );
 });
 
@@ -107,7 +145,9 @@ test("identity merge never overwrites manually edited fields", () => {
 test("identity OCR is triggered only from the identity upload slot", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(page, /if \(key === "identity"\)[\s\S]+processIdentityFile/);
-  assert.match(page, /parseTaiwanIdentityText\(result\.pages\)/);
+  assert.match(page, /runIdentityService/);
+  assert.doesNotMatch(page, /瀏覽器備援 OCR/);
+  assert.match(page, /無法連線本機 OCR 服務/);
   const addressProcessor = page.slice(
     page.indexOf("const processAddressFile"),
     page.indexOf("const applyIdentitySelection"),
@@ -129,6 +169,10 @@ test("identity OCR is triggered only from the identity upload slot", async () =>
     page,
     /\["identity", "name_reservation"\]\.includes\(slot\.key\)[\s\S]{0,100}"\.pdf,\.jpg,\.jpeg,\.png"/,
   );
+  for (const label of ["身分證正面", "身分證反面", "正反面合併掃描／A4"])
+    assert.match(page, new RegExp(label));
+  assert.match(page, /runIdentityService\([\s\S]+identityFileSides\.current/);
+  assert.match(page, /證號來自反面條碼/);
 });
 
 test("wizard navigation lives in consistent step footers and supports mobile", async () => {

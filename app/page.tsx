@@ -19,18 +19,19 @@ import {
   buildZip,
 } from "../lib/ooxml.mjs";
 import {
-  enhanceIdentityDocument,
   extractDocument,
   parsePageRange,
   splitPdfPages,
 } from "../lib/document-extraction.mjs";
 import {
-  isCompleteIdentityResult,
   mergeIdentityFields,
-  parseTaiwanIdentityText,
   selectIdentityResult,
 } from "../lib/identity-extraction.mjs";
 import { parsePrecheckText } from "../lib/precheck-extraction.mjs";
+import {
+  IdentityUploadSide,
+  recognizeIdentityWithService,
+} from "../lib/identity-service.mjs";
 import CasesDashboard from "./cases-dashboard";
 import ApprovalTracking from "./approval-tracking";
 
@@ -90,6 +91,9 @@ type IdentityResult = {
   name: string;
   nationalId: string;
   sourceFile: string;
+  birthDate?: string;
+  address?: string;
+  nationalIdSource?: string;
 };
 type IdentityRecognition = {
   state: "idle" | "processing" | "success" | "partial" | "review";
@@ -161,6 +165,7 @@ const initialForm = {
   company: "範例工程有限公司",
   representative: "王小明",
   nationalId: "A123456789",
+  birthDate: "",
   precheck: "115004506",
   approval: "115/01/22",
   expiry: "115/07/21",
@@ -197,21 +202,13 @@ const runExtraction = extractDocument as unknown as (
   }) => void,
   options?: { purpose?: "address" | "identity" | "precheck" | "generic" },
 ) => Promise<ExtractionResult>;
-const runIdentityEnhancement = enhanceIdentityDocument as unknown as (
-  file: File,
-  pages: { page: number; text: string }[],
-  onUpdate: (update: {
-    status: string;
-    progress: number;
-    method: string;
-    message: string;
-  }) => void,
-) => Promise<{
-  name: string;
-  nationalId: string;
-  rotation: number;
-  strategy: string;
-}>;
+const runIdentityService = recognizeIdentityWithService;
+const identitySideLabels: Record<IdentityUploadSide, string> = {
+  auto: "自動判斷",
+  front: "身分證正面",
+  back: "身分證反面",
+  combined: "正反面合併掃描／A4",
+};
 
 const cityOutputs: OutputItem[] = [
   {
@@ -379,8 +376,19 @@ export default function Home() {
   const activeAddressFiles = useRef(new Set<string>());
   const activeIdentityFiles = useRef<string[]>([]);
   const identityRun = useRef(0);
-  const identityManual = useRef({ representative: false, nationalId: false });
-  const lastAutoIdentity = useRef({ representative: "", nationalId: "" });
+  const identityManual = useRef({
+    representative: false,
+    nationalId: false,
+    birthDate: false,
+    contactAddress: false,
+  });
+  const lastAutoIdentity = useRef({
+    representative: "",
+    nationalId: "",
+    birthDate: "",
+    contactAddress: "",
+  });
+  const identityFileSides = useRef<Record<string, IdentityUploadSide>>({});
   const activePrecheckFile = useRef("");
   const precheckRun = useRef(0);
   const precheckManual = useRef({
@@ -394,6 +402,11 @@ export default function Home() {
   const refs = useRef<Record<SlotKey, HTMLInputElement | null>>(
     {} as Record<SlotKey, HTMLInputElement | null>,
   );
+  const identityRefs = useRef<Record<"front" | "back" | "combined", HTMLInputElement | null>>({
+    front: null,
+    back: null,
+    combined: null,
+  });
 
   const validFiles = (key: SlotKey) => files[key].filter(supported);
   const applyCandidates = (
@@ -475,8 +488,23 @@ export default function Home() {
           current.nationalId === previous.nationalId
             ? ""
             : current.nationalId,
+        birthDate:
+          !identityManual.current.birthDate &&
+          current.birthDate === previous.birthDate
+            ? ""
+            : current.birthDate,
+        contactAddress:
+          !identityManual.current.contactAddress &&
+          current.contactAddress === previous.contactAddress
+            ? ""
+            : current.contactAddress,
       }));
-      lastAutoIdentity.current = { representative: "", nationalId: "" };
+      lastAutoIdentity.current = {
+        representative: "",
+        nationalId: "",
+        birthDate: "",
+        contactAddress: "",
+      };
       return;
     }
     if (selected.state === "processing") {
@@ -504,6 +532,14 @@ export default function Home() {
           current.nationalId === previous.nationalId
             ? ""
             : merged.nationalId,
+        birthDate:
+          identityManual.current.birthDate || !parsed?.birthDate
+            ? current.birthDate
+            : parsed.birthDate,
+        contactAddress:
+          identityManual.current.contactAddress || !parsed?.address
+            ? current.contactAddress
+            : parsed.address,
       };
     });
     lastAutoIdentity.current = {
@@ -515,6 +551,14 @@ export default function Home() {
         identityManual.current.nationalId || !parsed?.nationalId
           ? previous.nationalId
           : parsed.nationalId,
+      birthDate:
+        identityManual.current.birthDate || !parsed?.birthDate
+          ? previous.birthDate
+          : parsed.birthDate,
+      contactAddress:
+        identityManual.current.contactAddress || !parsed?.address
+          ? previous.contactAddress
+          : parsed.address,
     };
     if (selected.state === "success")
       setIdentityRecognition({
@@ -539,11 +583,60 @@ export default function Home() {
       [id]: {
         status: "pending",
         progress: 0,
-        method: "等待處理",
-        message: "準備在瀏覽器內辨識身分證",
+        method: "PP-OCRv6 small",
+        message: "正在送至本機 OCR 服務",
       },
     }));
-    const result = await runExtraction(file, (update) => {
+    try {
+      const serviceResult = await runIdentityService(
+        file,
+        identityFileSides.current[id] ?? "auto",
+      );
+      if (
+        run !== identityRun.current ||
+        !activeIdentityFiles.current.includes(id)
+      )
+        return;
+      const identity: IdentityResult = {
+        name: serviceResult.name,
+        nationalId: serviceResult.nationalId,
+        birthDate: serviceResult.birthDate,
+        address: serviceResult.address,
+        nationalIdSource: serviceResult.nationalIdSource,
+        sourceFile: file.name,
+      };
+      const found = [
+        serviceResult.name && "姓名",
+        serviceResult.nationalId && "證號",
+        serviceResult.birthDate && "生日",
+        serviceResult.address && "地址",
+      ].filter(Boolean);
+      const missing = [
+        !serviceResult.name && "姓名",
+        !serviceResult.nationalId && "證號",
+        !serviceResult.birthDate && "生日",
+        !serviceResult.address && "地址",
+      ].filter(Boolean);
+      const complete = Boolean(serviceResult.name && serviceResult.nationalId);
+      setExtractions((current) => ({
+        ...current,
+        [id]: {
+          status: complete ? "success" : "review",
+          progress: 100,
+          method: serviceResult.model,
+          message:
+            complete
+              ? `辨識完成${serviceResult.nationalIdSource === "barcode" ? "（證號來自反面條碼）" : ""}，請人工確認`
+              : `已取得${found.join("、") || "部分影像"}；未辨識${missing.join("、")}，請人工確認。`,
+        },
+      }));
+      setIdentityResults((current) => {
+        const next = { ...current, [id]: identity };
+        applyIdentitySelection(next);
+        return next;
+      });
+      return;
+    } catch (error) {
       if (
         run !== identityRun.current ||
         !activeIdentityFiles.current.includes(id)
@@ -552,76 +645,24 @@ export default function Home() {
       setExtractions((current) => ({
         ...current,
         [id]: {
-          status: update.status as ExtractionStatus,
-          progress: update.progress,
-          method: update.method,
-          message: update.message,
+          status: "error",
+          progress: 100,
+          method: "OCR 服務連線失敗",
+          message:
+            error instanceof Error && error.message.includes("timed out")
+              ? "OCR 辨識逾時，請確認服務仍在執行後重試。"
+              : "無法連線本機 OCR 服務，請確認 OCR 視窗已啟動後重試。",
         },
       }));
-    }, { purpose: "identity" });
-    if (
-      run !== identityRun.current ||
-      !activeIdentityFiles.current.includes(id)
-    )
-      return;
-    let parsed = parseTaiwanIdentityText(result.pages);
-    let correction: { rotation?: number; strategy?: string } = {};
-    if (!isCompleteIdentityResult(parsed)) {
-      try {
-        const enhanced = await runIdentityEnhancement(
-          file,
-          result.pages,
-          (update) => {
-            if (
-              run !== identityRun.current ||
-              !activeIdentityFiles.current.includes(id)
-            )
-              return;
-            setExtractions((current) => ({
-              ...current,
-              [id]: {
-                status: update.status as ExtractionStatus,
-                progress: update.progress,
-                method: update.method,
-                message: update.message,
-              },
-            }));
-          },
-        );
-        parsed = { name: enhanced.name, nationalId: enhanced.nationalId };
-        correction = enhanced;
-      } catch {
-        correction = { strategy: "enhancement-failed" };
-      }
-      if (
-        run !== identityRun.current ||
-        !activeIdentityFiles.current.includes(id)
-      )
-        return;
+      setIdentityResults((current) => {
+        const next = {
+          ...current,
+          [id]: { name: "", nationalId: "", sourceFile: file.name },
+        };
+        applyIdentitySelection(next);
+        return next;
+      });
     }
-    const identity = { ...parsed, sourceFile: file.name };
-    setExtractions((current) => ({
-      ...current,
-      [id]: {
-        status: parsed.name && parsed.nationalId ? "success" : "review",
-        progress: 100,
-        method: result.method,
-        message:
-          parsed.name && parsed.nationalId
-            ? correction.rotation || correction.strategy?.startsWith("crop-")
-              ? "已完成方向校正或局部強化，請人工確認"
-              : "已辨識姓名與有效身分證字號，請人工確認"
-            : correction.strategy === "enhancement-failed"
-              ? "方向校正未完成，請人工輸入"
-              : "未完整辨識，請人工輸入",
-        result,
-      },
-    }));
-    setIdentityResults((current) => {
-      const next = { ...current, [id]: identity };
-      applyIdentitySelection(next);
-      return next;
-    });
   };
   const processPrecheckFile = async (file: File, run: number) => {
     const id = fileId(file);
@@ -721,7 +762,11 @@ export default function Home() {
         : `「${file.name}」未辨識到有效預查編號，請人工輸入。`,
     });
   };
-  const addFiles = (key: SlotKey, incoming: FileList | null) => {
+  const addFiles = (
+    key: SlotKey,
+    incoming: FileList | null,
+    identitySide: IdentityUploadSide = "auto",
+  ) => {
     if (!incoming?.length) return;
     const multiple = slots.find((slot) => slot.key === key)?.multiple;
     const next = Array.from(incoming).filter(
@@ -731,7 +776,20 @@ export default function Home() {
           ["pdf", "jpg", "jpeg", "png"].includes(ext(file))),
     );
     if (!next.length) return;
-    const selected = multiple ? [...files[key], ...next] : next.slice(0, 1);
+    if (key === "identity")
+      for (const file of next)
+        identityFileSides.current[fileId(file)] = identitySide;
+    const selected =
+      key === "identity" && identitySide !== "auto"
+        ? [
+            ...files[key].filter(
+              (file) => identityFileSides.current[fileId(file)] !== identitySide,
+            ),
+            ...next.slice(0, 1),
+          ]
+        : multiple
+          ? [...files[key], ...next]
+          : next.slice(0, 1);
     setFiles((current) => ({ ...current, [key]: selected }));
     if (key === "address_bundle") {
       activeAddressFiles.current = new Set(selected.map(fileId));
@@ -759,9 +817,13 @@ export default function Home() {
       void processPrecheckFile(file, run);
     }
   };
-  const drop = (event: DragEvent<HTMLDivElement>, key: SlotKey) => {
+  const drop = (
+    event: DragEvent<HTMLDivElement>,
+    key: SlotKey,
+    identitySide: IdentityUploadSide = "auto",
+  ) => {
     event.preventDefault();
-    addFiles(key, event.dataTransfer.files);
+    addFiles(key, event.dataTransfer.files, identitySide);
   };
   const preview = (file: File) => {
     const url = URL.createObjectURL(file);
@@ -775,6 +837,7 @@ export default function Home() {
     if (!removed) return;
     if (slot === "identity") {
       const id = fileId(removed);
+      delete identityFileSides.current[id];
       activeIdentityFiles.current = nextFiles.map(fileId);
       const run = ++identityRun.current;
       setExtractions((current) => {
@@ -1074,6 +1137,7 @@ export default function Home() {
       company: item.companyName,
       representative: "",
       nationalId: "",
+      birthDate: "",
       precheck: "",
       approval: "",
       expiry: "",
@@ -1097,8 +1161,19 @@ export default function Home() {
     activeAddressFiles.current = new Set();
     activeIdentityFiles.current = [];
     identityRun.current += 1;
-    identityManual.current = { representative: false, nationalId: false };
-    lastAutoIdentity.current = { representative: "", nationalId: "" };
+    identityManual.current = {
+      representative: false,
+      nationalId: false,
+      birthDate: false,
+      contactAddress: false,
+    };
+    lastAutoIdentity.current = {
+      representative: "",
+      nationalId: "",
+      birthDate: "",
+      contactAddress: "",
+    };
+    identityFileSides.current = {};
     activePrecheckFile.current = "";
     precheckRun.current += 1;
     precheckManual.current = {
@@ -1218,6 +1293,36 @@ export default function Home() {
                         </strong>
                         <small>{slot.purpose}</small>
                       </div>
+                      {slot.key === "identity" ? (
+                        <div className="identity-upload-grid">
+                          {(["front", "back", "combined"] as const).map((side) => (
+                            <div
+                              className="slot-drop identity-drop"
+                              key={side}
+                              onDragOver={(event) => event.preventDefault()}
+                              onDrop={(event) => drop(event, "identity", side)}
+                            >
+                              <input
+                                ref={(node) => { identityRefs.current[side] = node; }}
+                                type="file"
+                                accept=".pdf,.jpg,.jpeg,.png"
+                                onChange={(event) => {
+                                  addFiles("identity", event.target.files, side);
+                                  event.target.value = "";
+                                }}
+                              />
+                              <button
+                                className="secondary small"
+                                onClick={() => identityRefs.current[side]?.click()}
+                              >
+                                <UploadCloud size={15} />
+                                {identitySideLabels[side]}
+                              </button>
+                              <span>{side === "combined" ? "一頁含正反面" : "限 1 個檔案"}</span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
                       <div
                         className="slot-drop"
                         onDragOver={(event) => event.preventDefault()}
@@ -1250,6 +1355,7 @@ export default function Home() {
                           {slot.multiple ? "可上傳多個檔案" : "限 1 個檔案"}
                         </span>
                       </div>
+                      )}
                       <div className="slot-files">
                         {files[slot.key].map((file, index) => (
                           <div
@@ -1261,6 +1367,8 @@ export default function Home() {
                               <strong>{file.name}</strong>
                               <span>
                                 {ext(file).toUpperCase()}・{fileSize(file.size)}
+                                {slot.key === "identity" &&
+                                  `・${identitySideLabels[identityFileSides.current[fileId(file)] ?? "auto"]}`}
                               </span>
                               {(slot.key === "address_bundle" ||
                                 slot.key === "identity" ||
@@ -1486,6 +1594,7 @@ export default function Home() {
                       company: "公司名稱",
                       representative: "負責人姓名",
                       nationalId: "身分證字號（完整顯示）",
+                      birthDate: "出生日期（民國年）",
                       precheck: "預查編號",
                       approval: "核准日期",
                       expiry: "名稱保留期限",
@@ -1507,6 +1616,10 @@ export default function Home() {
                       identityManual.current.representative = true;
                     if (key === "nationalId")
                       identityManual.current.nationalId = true;
+                    if (key === "birthDate")
+                      identityManual.current.birthDate = true;
+                    if (key === "contactAddress")
+                      identityManual.current.contactAddress = true;
                     if (
                       key === "company" ||
                       key === "precheck" ||
