@@ -2,10 +2,12 @@ import unittest
 
 import cv2
 import numpy as np
+import zxingcpp
 
 from app.identity import (
     OcrToken,
     date_consistency_warnings,
+    decode_barcode_national_id,
     detect_card_candidates,
     extract_address,
     extract_birth_date,
@@ -111,6 +113,20 @@ class IdentityParsingTests(unittest.TestCase):
             ["出生年月日與發證日期疑似對調，請人工確認"],
         )
         self.assertTrue(date_consistency_warnings("110/01/01", "115/01/09"))
+
+    def test_decodes_barcode_on_a_low_resolution_back(self):
+        # A 412x237 crop is a common scan size and its bars are too thin to
+        # detect until the image is enlarged.
+        image = np.full((237, 412, 3), 255, np.uint8)
+        barcode = zxingcpp.create_barcode("A123456789", zxingcpp.BarcodeFormat.Code128)
+        rendered = cv2.cvtColor(
+            np.array(zxingcpp.write_barcode_to_image(barcode)), cv2.COLOR_GRAY2BGR
+        )
+        rendered = cv2.resize(rendered, (200, 40), interpolation=cv2.INTER_NEAREST)
+        image[170:210, 20:220] = rendered
+        national_id, barcode_format = decode_barcode_national_id(image)
+        self.assertEqual(national_id, "A123456789")
+        self.assertIn("128", barcode_format)
 
     def test_detects_two_card_shaped_regions_on_a4(self):
         image = np.full((1400, 1000, 3), 255, np.uint8)

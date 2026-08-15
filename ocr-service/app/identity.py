@@ -473,6 +473,11 @@ def decode_barcode_national_id(image: np.ndarray) -> tuple[str, str]:
         scan[:, int(width * 0.42):width],
         scan,
     ]
+    # Low-resolution scans (a 412x237 crop of a card is common) carry bars too
+    # thin for the detector until the image is enlarged, so retry upscaled
+    # before giving up. This only runs when the cheap passes found nothing.
+    if max(height, width) < 1200:
+        regions.append(cv2.resize(scan, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC))
     formats = (
         zxingcpp.BarcodeFormat.PDF417
         | zxingcpp.BarcodeFormat.CompactPDF417
@@ -484,7 +489,9 @@ def decode_barcode_national_id(image: np.ndarray) -> tuple[str, str]:
             region,
             formats=formats,
             try_rotate=True,
-            try_downscale=False,
+            # Required: with downscaling disabled the detector misses the
+            # barcode on high-resolution phone photos of the card.
+            try_downscale=True,
             try_invert=False,
         ):
             national_id = extract_national_id([barcode.text])

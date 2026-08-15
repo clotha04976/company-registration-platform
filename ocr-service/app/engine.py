@@ -35,6 +35,7 @@ class CardResult:
     address: str = ""
     confidence: float = 0.0
     barcode_format: str = ""
+    national_id_mismatch: bool = False
 
 
 class IdentityOcrEngine:
@@ -90,12 +91,15 @@ class IdentityOcrEngine:
         tokens = self._tokens(ocr.predict(input=image))
         texts = [token.text for token in tokens]
         ocr_id = extract_national_id(texts)
+        # The back barcode encodes the national ID directly, so it is exact
+        # where OCR has to read small red print that holograms sit on top of.
+        # Decoding costs ~30ms against ~2s for recognition, so it is always
+        # worth attempting on anything that could be a back.
         barcode_id, barcode_format = (
-            decode_barcode_national_id(image)
-            if not ocr_id and requested_side != "front"
-            else ("", "")
+            ("", "") if requested_side == "front" else decode_barcode_national_id(image)
         )
-        national_id = ocr_id or barcode_id
+        national_id = barcode_id or ocr_id
+        national_id_mismatch = bool(barcode_id and ocr_id and barcode_id != ocr_id)
         address = extract_address(tokens)
         detected_side = classify_side(tokens, national_id, address)
         side = requested_side if requested_side in ("front", "back") else detected_side
@@ -103,7 +107,8 @@ class IdentityOcrEngine:
             side=side,
             name=extract_name(tokens) if side != "back" else "",
             national_id=national_id,
-            national_id_source="ocr" if ocr_id else ("barcode" if barcode_id else ""),
+            national_id_source="barcode" if barcode_id else ("ocr" if ocr_id else ""),
+            national_id_mismatch=national_id_mismatch,
             birth_date=extract_birth_date(tokens) if side != "back" else "",
             issue_date=extract_issue_date(tokens) if side != "back" else "",
             address=address if side != "front" else "",
@@ -140,6 +145,8 @@ class IdentityOcrEngine:
             warnings.append("合併頁未穩定偵測到兩張卡片，已使用可用候選或整頁辨識")
         if not national_id:
             warnings.append("未取得通過 checksum 的身分證字號")
+        if any(item.national_id_mismatch for item in results):
+            warnings.append("背面條碼與正面辨識的身分證字號不一致，已採用條碼值，請人工確認")
         warnings.extend(date_consistency_warnings(birth_date, issue_date))
         return {
             "status": "success" if national_id and (name or address) else "review",
