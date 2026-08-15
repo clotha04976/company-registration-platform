@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import re
 import os
+import unicodedata
 from dataclasses import dataclass
+from datetime import date
 from typing import Iterable, Literal
 
 import cv2
@@ -24,6 +26,24 @@ NAME_EXCLUSIONS = {
     "配偶", "役別", "出生地", "住址", "地址", "國籍", "年月日", "年月",
     "年日", "月日", "性別", "性别女", "女性",
 }
+
+# PP-OCRv6 emits simplified glyphs for several characters printed on the card
+# (换發 / 统一编號 / 性别 / 役别). Label matching must fold them first or the
+# anchors silently never match.
+SIMPLIFIED_FOLD = str.maketrans(
+    "换发证号税别县镇乡邻里区街楼层务义国湾台",
+    "換發證號稅別縣鎮鄉鄰里區街樓層務義國灣臺",
+)
+
+# 民國 dates are only ever issued to people aged 14 or above, which is what
+# separates 發證日期 from 出生年月日 when the printed labels are unreadable.
+MINIMUM_ISSUE_AGE = 14
+
+
+def fold_text(value: str) -> str:
+    """Half-width folding plus simplified-to-traditional for label matching."""
+    folded = unicodedata.normalize("NFKC", str(value or ""))
+    return folded.translate(SIMPLIFIED_FOLD)
 
 
 @dataclass(frozen=True)
@@ -152,54 +172,148 @@ def normalize_roc_date(value: str) -> str:
     return f"{year:03d}/{month:02d}/{day:02d}"
 
 
+ISSUE_MARKER = re.compile(r"發證|[換補初]發")
+
+
+def _is_issue_token(text: str) -> bool:
+    return bool(ISSUE_MARKER.search(fold_text(text)))
+
+
 def extract_birth_date(tokens: list[OcrToken]) -> str:
     ordered = _near_label(tokens, ("出生日期", "出生"))
     for token in ordered:
+        if _is_issue_token(token.text):
+            continue
         parsed = normalize_roc_date(token.text)
         if parsed:
             return parsed
     for index, token in enumerate(tokens):
-        if "出生" not in token.text:
+        if "出生" not in fold_text(token.text):
             continue
-        parsed = normalize_roc_date(" ".join(item.text for item in tokens[index:index + 5]))
+        # 發證日期 sits directly below 出生年月日 and carries the same date
+        # shape, so joining a raw token window can silently return the issue
+        # date instead. Drop issue-date tokens before parsing the window.
+        window = [
+            item.text
+            for item in tokens[index:index + 5]
+            if not _is_issue_token(item.text)
+        ]
+        parsed = normalize_roc_date(" ".join(window))
         if parsed:
             return parsed
     return ""
 
 
+def extract_issue_date(tokens: list[OcrToken]) -> str:
+    for token in tokens:
+        if not _is_issue_token(token.text):
+            continue
+        parsed = normalize_roc_date(fold_text(token.text))
+        if parsed:
+            return parsed
+    ordered = _near_label(tokens, ("發證日期", "發證"))
+    for token in ordered:
+        parsed = normalize_roc_date(fold_text(token.text))
+        if parsed:
+            return parsed
+    return ""
+
+
+def _roc_parts(value: str) -> tuple[int, int, int] | None:
+    match = re.fullmatch(r"(\d{3})/(\d{2})/(\d{2})", value or "")
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def date_consistency_warnings(birth_date: str, issue_date: str) -> list[str]:
+    """Catch a birth/issue swap without needing the printed labels to be legible.
+
+    Both fields are 民國 dates in the same format, so a mis-anchored extraction
+    produces a plausible-looking value. These are the relations that must hold
+    between them; if swapping the two makes every relation hold, the pair was
+    almost certainly read the wrong way round.
+    """
+    birth, issue = _roc_parts(birth_date), _roc_parts(issue_date)
+    if not birth or not issue:
+        return []
+    problems = _relation_problems(birth, issue)
+    if not problems:
+        return []
+    if not _relation_problems(issue, birth):
+        return ["出生年月日與發證日期疑似對調，請人工確認"]
+    return problems
+
+
+def _relation_problems(birth: tuple[int, int, int], issue: tuple[int, int, int]) -> list[str]:
+    problems = []
+    if issue <= birth:
+        problems.append("發證日期早於或等於出生年月日")
+    elif issue[0] - birth[0] < MINIMUM_ISSUE_AGE:
+        problems.append(f"發證時未滿 {MINIMUM_ISSUE_AGE} 歲，出生年月日或發證日期可能誤讀")
+    if issue[0] > date.today().year - 1911:
+        problems.append("發證日期晚於今日")
+    return problems
+
+
 def normalize_address(value: str) -> str:
-    value = re.sub(r"\s+", "", value)
+    value = re.sub(r"\s+", "", fold_text(value))
     value = re.sub(r"^(?:戶籍)?(?:住址|地址)[:：]?", "", value)
     value = re.sub(r"\d{8,}$", "", value)
     value = value.replace("台北市", "臺北市").replace("台中市", "臺中市")
     value = value.replace("台南市", "臺南市").replace("台東縣", "臺東縣")
-    value = (
-        value.replace("县", "縣")
-        .replace("镇", "鎮")
-        .replace("乡", "鄉")
-        .replace("邻", "鄰")
-        .replace("号", "號")
-    )
     return re.sub(r"[，,。；;].*$", "", value).strip()
 
 
+ADDRESS_NEIGHBOUR_LABELS = ("父", "母", "配偶", "役別", "出生地", "統一編號", "姓名")
+ADDRESS_MARKER = re.compile(r"[縣市區鄉鎮村里鄰路街段巷弄號樓]")
+# 出生地 values ("臺灣省南投縣") sit one row above 住址 and look address-like,
+# but a 住址 never contains 省, which separates the two cleanly.
+BIRTHPLACE_MARKER = re.compile(r"[省]")
+
+
+def _address_value_tokens(tokens: list[OcrToken], label: OcrToken) -> list[OcrToken]:
+    """Collect the address lines that belong to a 住址 label.
+
+    The value wraps onto a second line and the label box is vertically centred
+    against both lines, so in reading order the first line can come *before*
+    the label. Scanning forward only returns the tail of the address (for
+    example "測試路一段133號" without its city and district) which still passes
+    a naive plausibility check, so the address must be gathered in both
+    directions and re-sorted.
+    """
+    span = label.height * 2.6
+    left_edge = label.box[0] - label.height * 0.5
+    picked = []
+    for token in tokens:
+        if token is label:
+            continue
+        if abs(token.center_y - label.center_y) > span:
+            continue
+        if token.box[0] < left_edge:
+            continue
+        compact = fold_text(token.text).replace(" ", "")
+        if re.fullmatch(r"\d{8,}", compact):
+            continue
+        if any(label_text in compact for label_text in ADDRESS_NEIGHBOUR_LABELS):
+            continue
+        if BIRTHPLACE_MARKER.search(compact):
+            continue
+        if not ADDRESS_MARKER.search(compact):
+            continue
+        picked.append(token)
+    picked.sort(key=lambda item: (round(item.center_y / max(item.height, 1)), item.center_x))
+    return picked
+
+
 def extract_address(tokens: list[OcrToken]) -> str:
-    for index, token in enumerate(tokens):
-        compact = token.text.replace(" ", "")
+    for token in tokens:
+        compact = fold_text(token.text).replace(" ", "")
         if "住址" not in compact and "地址" not in compact:
             continue
-        candidates = [re.sub(r"^.*?(?:住址|地址)[:：]?", "", compact)]
-        for item in tokens[index + 1:index + 7]:
-            item_compact = item.text.replace(" ", "")
-            if re.fullmatch(r"\d{8,}", item_compact):
-                break
-            if any(label in item_compact for label in ("父", "母", "配偶", "役別", "出生地")):
-                continue
-            candidates.append(item.text)
-            value = normalize_address("".join(candidates))
-            if "號" in value and len(value) >= 8:
-                break
-        value = normalize_address("".join(candidates))
+        suffix = re.sub(r"^.*?(?:住址|地址)[:：]?", "", compact)
+        parts = [suffix] + [item.text for item in _address_value_tokens(tokens, token)]
+        value = normalize_address("".join(parts))
         if len(value) >= 8 and re.search(r"[縣市鄉鎮區路街巷弄號]", value):
             return value[:80]
     return ""

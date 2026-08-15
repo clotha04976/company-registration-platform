@@ -5,9 +5,11 @@ import numpy as np
 
 from app.identity import (
     OcrToken,
+    date_consistency_warnings,
     detect_card_candidates,
     extract_address,
     extract_birth_date,
+    extract_issue_date,
     extract_name,
     extract_national_id,
     is_valid_national_id,
@@ -57,6 +59,58 @@ class IdentityParsingTests(unittest.TestCase):
             extract_address(tokens),
             "南投縣竹山鎮延祥里17鄰集山路三段301巷81弄62號",
         )
+
+    def test_address_first_line_printed_above_the_label(self):
+        # The 住址 label box is centred against both wrapped lines, so in
+        # reading order the first line precedes the label. Scanning forward
+        # only would return "測試路一段133號" without its city and district.
+        tokens = [
+            OcrToken("臺中市南屯區範例里9鄰", 0.99, (200, 100, 460, 124)),
+            OcrToken("住址", 0.99, (30, 128, 72, 152)),
+            OcrToken("測試路一段133號", 0.99, (200, 156, 420, 180)),
+        ]
+        self.assertEqual(
+            extract_address(tokens),
+            "臺中市南屯區範例里9鄰測試路一段133號",
+        )
+
+    def test_address_ignores_birthplace_row_above_it(self):
+        tokens = [
+            OcrToken("出生地", 0.99, (30, 60, 72, 84)),
+            OcrToken("臺灣省南投縣", 0.99, (200, 60, 340, 84)),
+            OcrToken("住址南投縣草屯鎮範例里12鄰", 0.99, (30, 100, 420, 124)),
+            OcrToken("測試街59號", 0.99, (200, 130, 330, 154)),
+        ]
+        self.assertEqual(
+            extract_address(tokens),
+            "南投縣草屯鎮範例里12鄰測試街59號",
+        )
+
+    def test_address_folds_full_width_digits(self):
+        tokens = [
+            OcrToken("住址", 0.99, (30, 100, 72, 124)),
+            OcrToken("臺中市東區測試街４０２號", 0.99, (200, 100, 480, 124)),
+        ]
+        self.assertEqual(extract_address(tokens), "臺中市東區測試街402號")
+
+    def test_birth_date_ignores_issue_date_token(self):
+        # 發證日期 carries the same 民國 date shape and sits directly below
+        # 出生年月日, so it must not satisfy the birth-date lookup.
+        tokens = [
+            OcrToken("出生", 0.99, (30, 100, 72, 124)),
+            OcrToken("發證日期民國115年1月9日(竹縣)换發", 0.99, (200, 108, 620, 132)),
+            OcrToken("年月日民國82年10月12日", 0.99, (200, 140, 520, 164)),
+        ]
+        self.assertEqual(extract_birth_date(tokens), "082/10/12")
+        self.assertEqual(extract_issue_date(tokens), "115/01/09")
+
+    def test_flags_swapped_birth_and_issue_dates(self):
+        self.assertEqual(date_consistency_warnings("082/10/12", "115/01/09"), [])
+        self.assertEqual(
+            date_consistency_warnings("115/01/09", "082/10/12"),
+            ["出生年月日與發證日期疑似對調，請人工確認"],
+        )
+        self.assertTrue(date_consistency_warnings("110/01/01", "115/01/09"))
 
     def test_detects_two_card_shaped_regions_on_a4(self):
         image = np.full((1400, 1000, 3), 255, np.uint8)

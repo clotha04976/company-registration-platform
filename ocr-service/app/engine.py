@@ -12,10 +12,12 @@ import numpy as np
 from .identity import (
     OcrToken,
     classify_side,
+    date_consistency_warnings,
     decode_barcode_national_id,
     detect_card_candidates,
     extract_address,
     extract_birth_date,
+    extract_issue_date,
     extract_name,
     extract_national_id,
     refine_document_corners,
@@ -29,6 +31,7 @@ class CardResult:
     national_id: str = ""
     national_id_source: str = ""
     birth_date: str = ""
+    issue_date: str = ""
     address: str = ""
     confidence: float = 0.0
     barcode_format: str = ""
@@ -102,6 +105,7 @@ class IdentityOcrEngine:
             national_id=national_id,
             national_id_source="ocr" if ocr_id else ("barcode" if barcode_id else ""),
             birth_date=extract_birth_date(tokens) if side != "back" else "",
+            issue_date=extract_issue_date(tokens) if side != "back" else "",
             address=address if side != "front" else "",
             confidence=round(sum(token.score for token in tokens) / len(tokens), 4) if tokens else 0.0,
             barcode_format=barcode_format,
@@ -129,12 +133,14 @@ class IdentityOcrEngine:
         national_id = next((item.national_id for item in results if item.national_id), "")
         national_id_source = next((item.national_id_source for item in results if item.national_id == national_id), "")
         birth_date = next((item.birth_date for item in results if item.birth_date), "")
+        issue_date = next((item.issue_date for item in results if item.issue_date), "")
         address = next((item.address for item in results if item.address), "")
         warnings = []
         if requested_side == "combined" and len(cards) < 2:
             warnings.append("合併頁未穩定偵測到兩張卡片，已使用可用候選或整頁辨識")
         if not national_id:
             warnings.append("未取得通過 checksum 的身分證字號")
+        warnings.extend(date_consistency_warnings(birth_date, issue_date))
         return {
             "status": "success" if national_id and (name or address) else "review",
             "model": "PP-OCRv6-small",
@@ -145,6 +151,7 @@ class IdentityOcrEngine:
             "national_id": national_id,
             "national_id_source": national_id_source,
             "birth_date": birth_date,
+            "issue_date": issue_date,
             "address": address,
             "confidence": max((item.confidence for item in results), default=0.0),
             "cards": [asdict(item) for item in results],
