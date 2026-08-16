@@ -478,11 +478,14 @@ def decode_barcode_national_id(image: np.ndarray) -> tuple[str, str]:
     # before giving up. This only runs when the cheap passes found nothing.
     if max(height, width) < 1200:
         regions.append(cv2.resize(scan, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC))
+    # zxing-cpp 3.x deprecated combining formats with `|` and wants a tuple.
+    # The tuple form is 3.x-only, which is fine: try_invert below is also 3.x
+    # only, so requirements pin >=3.1.
     formats = (
-        zxingcpp.BarcodeFormat.PDF417
-        | zxingcpp.BarcodeFormat.CompactPDF417
-        | zxingcpp.BarcodeFormat.Code39
-        | zxingcpp.BarcodeFormat.Code128
+        zxingcpp.BarcodeFormat.PDF417,
+        zxingcpp.BarcodeFormat.CompactPDF417,
+        zxingcpp.BarcodeFormat.Code39,
+        zxingcpp.BarcodeFormat.Code128,
     )
     for region in regions:
         for barcode in zxingcpp.read_barcodes(
