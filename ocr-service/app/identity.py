@@ -272,9 +272,19 @@ ADDRESS_MARKER = re.compile(r"[縣市區鄉鎮村里鄰路街段巷弄號樓]")
 # most cards print a bare "臺北市", which is why the row ownership test below
 # does the real work.
 BIRTHPLACE_MARKER = re.compile(r"[省]")
+# OCR regularly merges neighbouring fields into a single token ("出生地臺灣省臺
+# 中縣", "配偶陳美玉役别替代備役"), so a token carrying a foreign label can still
+# hold real address text. Cut at the label rather than discarding the token.
+FOREIGN_FIELD = re.compile(
+    "|".join(ADDRESS_NEIGHBOUR_LABELS) + r"|發證日期|[換補初]發|民國\d"
+)
 
 
-def _address_value_tokens(tokens: list[OcrToken], label: OcrToken) -> list[OcrToken]:
+def trim_foreign_fields(text: str) -> str:
+    return FOREIGN_FIELD.split(text, 1)[0]
+
+
+def _address_value_tokens(tokens: list[OcrToken], label: OcrToken) -> list[str]:
     """Collect the address lines that belong to a 住址 label.
 
     The value wraps onto a second line and the label box is vertically centred
@@ -308,10 +318,8 @@ def _address_value_tokens(tokens: list[OcrToken], label: OcrToken) -> list[OcrTo
             continue
         if token.box[0] < left_edge:
             continue
-        compact = fold_text(token.text).replace(" ", "")
-        if re.fullmatch(r"\d{8,}", compact):
-            continue
-        if any(label_text in compact for label_text in ADDRESS_NEIGHBOUR_LABELS):
+        compact = trim_foreign_fields(fold_text(token.text).replace(" ", ""))
+        if not compact or re.fullmatch(r"\d{8,}", compact):
             continue
         if BIRTHPLACE_MARKER.search(compact):
             continue
@@ -320,9 +328,28 @@ def _address_value_tokens(tokens: list[OcrToken], label: OcrToken) -> list[OcrTo
         own_distance = abs(token.center_y - label.center_y)
         if any(abs(token.center_y - rival.center_y) < own_distance for rival in rivals):
             continue
-        picked.append(token)
-    picked.sort(key=lambda item: (round(item.center_y / max(item.height, 1)), item.center_x))
-    return picked
+        picked.append((token, compact))
+    # Rounding center_y against a glyph height puts lines on separate rows into
+    # the same bucket as soon as the heights differ, and the x tie-break then
+    # emits them backwards ("測試路9號二十四樓之9臺中市梧棲區範例里9鄰").
+    # Neither the token's own height nor the label's is a dependable divisor,
+    # so rows are grouped by actual box overlap instead.
+    rows: list[list[tuple[OcrToken, str]]] = []
+    for item in sorted(picked, key=lambda entry: entry[0].box[1]):
+        token = item[0]
+        for existing in rows:
+            head = existing[0][0]
+            overlap = min(head.box[3], token.box[3]) - max(head.box[1], token.box[1])
+            if overlap > 0.5 * min(head.height, token.height):
+                existing.append(item)
+                break
+        else:
+            rows.append([item])
+    ordered: list[str] = []
+    for existing in rows:
+        existing.sort(key=lambda entry: entry[0].center_x)
+        ordered.extend(text for _, text in existing)
+    return ordered
 
 
 def extract_address(tokens: list[OcrToken]) -> str:
@@ -330,8 +357,8 @@ def extract_address(tokens: list[OcrToken]) -> str:
         compact = fold_text(token.text).replace(" ", "")
         if "住址" not in compact and "地址" not in compact:
             continue
-        suffix = re.sub(r"^.*?(?:住址|地址)[:：]?", "", compact)
-        parts = [suffix] + [item.text for item in _address_value_tokens(tokens, token)]
+        suffix = trim_foreign_fields(re.sub(r"^.*?(?:住址|地址)[:：]?", "", compact))
+        parts = [suffix] + _address_value_tokens(tokens, token)
         value = normalize_address("".join(parts))
         if len(value) >= 8 and re.search(r"[縣市鄉鎮區路街巷弄號]", value):
             return value[:80]

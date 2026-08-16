@@ -112,6 +112,49 @@ class IdentityParsingTests(unittest.TestCase):
             "新北市汐止區範例里4鄰測試路二段66巷111弄35號",
         )
 
+    def test_address_orders_rows_of_differing_glyph_heights(self):
+        # Measured from a real card: the rows are 43px apart but their glyph
+        # heights differ (39 vs 41), so bucketing by each token's own height
+        # collapsed them into one row and the x tie-break emitted the second
+        # line first. Row order must not depend on glyph height.
+        tokens = [
+            OcrToken("住址", 0.99, (96, 943, 149, 995)),
+            OcrToken("測試路9號二十四樓之9", 0.99, (280, 968, 502, 1009)),
+            OcrToken("臺中市梧棲區範例里9鄰", 0.99, (306, 926, 522, 965)),
+        ]
+        self.assertEqual(
+            extract_address(tokens),
+            "臺中市梧棲區範例里9鄰測試路9號二十四樓之9",
+        )
+
+    def test_address_orders_rows_separated_by_a_single_pixel(self):
+        # Measured from a real card: the two lines are adjacent to the pixel
+        # (bottom 624, top 625) and the upper line is the wider of the two, so
+        # any row bucketing that falls through to an x tie-break inverts them.
+        tokens = [
+            OcrToken("新北市新店區範例里10鄰", 0.99, (372, 576, 900, 624)),
+            OcrToken("住址", 0.99, (232, 611, 336, 663)),
+            OcrToken("測試街91號二樓", 0.99, (376, 625, 706, 675)),
+        ]
+        self.assertEqual(
+            extract_address(tokens),
+            "新北市新店區範例里10鄰測試街91號二樓",
+        )
+
+    def test_address_keeps_text_glued_to_a_foreign_label(self):
+        # OCR merges adjacent fields into one token often enough that a whole
+        # merged token cannot simply be discarded: "出生地臺灣省臺中縣" and
+        # "配偶陳美玉役别替代備役" both occur in the samples. Cutting at the
+        # label keeps whatever address text shares the token.
+        tokens = [
+            OcrToken("住址", 0.99, (30, 100, 72, 124)),
+            OcrToken("臺中市大甲區範例里9鄰測試路五段468號統一編號", 0.99, (200, 100, 700, 124)),
+        ]
+        self.assertEqual(
+            extract_address(tokens),
+            "臺中市大甲區範例里9鄰測試路五段468號",
+        )
+
     def test_address_folds_full_width_digits(self):
         tokens = [
             OcrToken("住址", 0.99, (30, 100, 72, 124)),
