@@ -88,6 +88,30 @@ class IdentityParsingTests(unittest.TestCase):
             "南投縣草屯鎮範例里12鄰測試街59號",
         )
 
+    def test_address_ignores_bare_city_birthplace(self):
+        # Real geometry from a card whose 出生地 is a bare "臺北市": it carries
+        # no 省 and looks exactly like the head of an address, so only row
+        # ownership keeps it out. Also covers the two 10-digit card serials
+        # printed above and below the fields.
+        tokens = [
+            OcrToken("0102030405", 0.99, (1279, 1, 1369, 32)),
+            OcrToken("父", 0.99, (37, 38, 104, 105)),
+            OcrToken("母", 0.99, (668, 38, 741, 111)),
+            OcrToken("王大明", 0.99, (297, 55, 583, 150)),
+            OcrToken("陳美玉", 0.99, (948, 55, 1235, 152)),
+            OcrToken("役別", 0.99, (682, 169, 827, 241)),
+            OcrToken("出生地", 0.99, (46, 295, 193, 368)),
+            OcrToken("臺北市", 0.99, (212, 324, 479, 413)),
+            OcrToken("住址", 0.99, (86, 451, 151, 516)),
+            OcrToken("新北市汐止區範例里4鄰", 0.99, (259, 445, 844, 520)),
+            OcrToken("測試路二段66巷111弄35號", 0.99, (259, 515, 935, 582)),
+            OcrToken("0506070809", 0.99, (1043, 762, 1258, 836)),
+        ]
+        self.assertEqual(
+            extract_address(tokens),
+            "新北市汐止區範例里4鄰測試路二段66巷111弄35號",
+        )
+
     def test_address_folds_full_width_digits(self):
         tokens = [
             OcrToken("住址", 0.99, (30, 100, 72, 124)),

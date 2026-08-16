@@ -267,8 +267,10 @@ def normalize_address(value: str) -> str:
 
 ADDRESS_NEIGHBOUR_LABELS = ("父", "母", "配偶", "役別", "出生地", "統一編號", "姓名")
 ADDRESS_MARKER = re.compile(r"[縣市區鄉鎮村里鄰路街段巷弄號樓]")
-# 出生地 values ("臺灣省南投縣") sit one row above 住址 and look address-like,
-# but a 住址 never contains 省, which separates the two cleanly.
+# A 出生地 written as "臺灣省南投縣" is separated from a 住址 by the 省, which no
+# modern Taiwanese address contains. This only covers the province-style form:
+# most cards print a bare "臺北市", which is why the row ownership test below
+# does the real work.
 BIRTHPLACE_MARKER = re.compile(r"[省]")
 
 
@@ -284,6 +286,20 @@ def _address_value_tokens(tokens: list[OcrToken], label: OcrToken) -> list[OcrTo
     """
     span = label.height * 2.6
     left_edge = label.box[0] - label.height * 0.5
+    # 出生地 sits directly above 住址 and its value is usually a bare city name
+    # ("臺北市"), which is indistinguishable from the head of an address by
+    # content alone. Rows are therefore assigned to whichever label they are
+    # vertically closest to, so a neighbouring field cannot be absorbed even
+    # when it falls inside the window below.
+    rivals = [
+        token
+        for token in tokens
+        if token is not label
+        and any(
+            text in fold_text(token.text).replace(" ", "")
+            for text in ADDRESS_NEIGHBOUR_LABELS
+        )
+    ]
     picked = []
     for token in tokens:
         if token is label:
@@ -300,6 +316,9 @@ def _address_value_tokens(tokens: list[OcrToken], label: OcrToken) -> list[OcrTo
         if BIRTHPLACE_MARKER.search(compact):
             continue
         if not ADDRESS_MARKER.search(compact):
+            continue
+        own_distance = abs(token.center_y - label.center_y)
+        if any(abs(token.center_y - rival.center_y) < own_distance for rival in rivals):
             continue
         picked.append(token)
     picked.sort(key=lambda item: (round(item.center_y / max(item.height, 1)), item.center_x))
