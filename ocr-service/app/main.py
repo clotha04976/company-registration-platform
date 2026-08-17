@@ -11,7 +11,7 @@ import pypdfium2 as pdfium
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from .engine import engine
+from .engine import engine, resolve_device
 
 MAX_FILE_SIZE = 25 * 1024 * 1024
 ALLOWED_EXTENSIONS = {"pdf", "jpg", "jpeg", "png"}
@@ -19,7 +19,7 @@ ALLOWED_EXTENSIONS = {"pdf", "jpg", "jpeg", "png"}
 app = FastAPI(title="公司登記身分證 OCR", version="0.1.0")
 origins = [origin.strip() for origin in os.getenv(
     "OCR_ALLOWED_ORIGINS",
-    "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173",
+    "http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173",
 ).split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
@@ -48,24 +48,12 @@ def decode_images(data: bytes, extension: str) -> list[np.ndarray]:
 
 @app.get("/health")
 def health() -> dict:
-    try:
-        import paddle
-
-        device = (
-            os.getenv("OCR_DEVICE", "").strip()
-            or (
-                "gpu:0"
-                if paddle.is_compiled_with_cuda()
-                and paddle.device.cuda.device_count() > 0
-                else "cpu"
-            )
-        )
-    except Exception:
-        device = os.getenv("OCR_DEVICE", "cpu")
+    # Reports the device the engine will use without importing Paddle, so the
+    # health check stays instant even before the first recognition loads models.
     return {
         "status": "ok",
         "model": "PP-OCRv6-small",
-        "device": device,
+        "device": resolve_device(),
         "stores_uploads": False,
     }
 

@@ -1,1 +1,0 @@
-ALTER TABLE `cases` ADD `stage` text DEFAULT 'name_precheck' NOT NULL;

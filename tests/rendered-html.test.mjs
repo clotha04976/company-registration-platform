@@ -26,6 +26,28 @@ import {
 } from "../lib/identity-extraction.mjs";
 import { PDFDocument } from "pdf-lib";
 
+const casesApiUrl = new URL("../api-service/app/cases.py", import.meta.url);
+const casesDbUrl = new URL("../api-service/app/db.py", import.meta.url);
+
+/** Python splits long SQL across adjacent literals; join them before matching. */
+async function readPython(url) {
+  const source = await readFile(url, "utf8");
+  return source.replace(/"\s*\n\s*"/g, "");
+}
+
+/**
+ * The four case routes used to be separate files. They now live in one FastAPI
+ * router, so assertions that a handler avoids something must read only that
+ * handler rather than the whole module.
+ */
+function handlerSource(source, header) {
+  const start = source.indexOf(header);
+  assert.ok(start >= 0, `找不到 ${header}`);
+  const rest = source.slice(start + header.length);
+  const end = rest.search(/\n@router\./);
+  return end === -1 ? rest : rest.slice(0, end);
+}
+
 test("Taiwan national ID validation uses official checksum", () => {
   assert.equal(isValidTaiwanNationalId("A123456789"), true);
   assert.equal(isValidTaiwanNationalId("A 1 2 8 0 8 2 7 3 4"), true);
@@ -320,14 +342,9 @@ test("Step 3 exposes DOCX and all three batch downloads", async () => {
 });
 
 test("case workflow supports four stages and backward-compatible completion", async () => {
-  const [dashboard, schema, api, database] = await Promise.all([
+  const [dashboard, api] = await Promise.all([
     readFile(new URL("../app/cases-dashboard.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
-    readFile(
-      new URL("../app/api/cases/[id]/route.ts", import.meta.url),
-      "utf8",
-    ),
-    readFile(new URL("../db/index.ts", import.meta.url), "utf8"),
+    readPython(casesApiUrl),
   ]);
   for (const stage of [
     "name_precheck",
@@ -336,15 +353,13 @@ test("case workflow supports four stages and backward-compatible completion", as
     "completed",
   ]) {
     assert.match(dashboard, new RegExp(stage));
-    assert.match(schema, new RegExp(stage));
+    assert.match(api, new RegExp(stage));
   }
   for (const label of ["名稱預查", "市政府", "國稅局", "已結案"])
     assert.match(dashboard, new RegExp(label));
-  assert.match(api, /action === "complete"/);
-  assert.match(api, /action === "restore"/);
+  assert.match(api, /action == "complete"/);
+  assert.match(api, /action == "restore"/);
   assert.match(api, /stage = 'national_tax'/);
-  assert.match(database, /PRAGMA table_info\(cases\)/);
-  assert.match(database, /ALTER TABLE cases ADD COLUMN stage/);
 });
 
 test("dashboard keeps one editable stage control without workflow percentages", async () => {
@@ -370,13 +385,11 @@ test("dashboard keeps one editable stage control without workflow percentages", 
 });
 
 test("dashboard counts all cases by created month and exposes no compensation data", async () => {
-  const [dashboard, route] = await Promise.all([
+  const [dashboard, api] = await Promise.all([
     readFile(new URL("../app/cases-dashboard.tsx", import.meta.url), "utf8"),
-    readFile(
-      new URL("../app/api/cases/dashboard/route.ts", import.meta.url),
-      "utf8",
-    ),
+    readPython(casesApiUrl),
   ]);
+  const route = handlerSource(api, "def dashboard(");
   for (const forbidden of [
     "獎金",
     "NT$500",
@@ -420,13 +433,11 @@ test("history details open as a read-only preview without changing case state", 
 });
 
 test("selected-month employee count expands monthly cases with safe routing", async () => {
-  const [dashboard, route] = await Promise.all([
+  const [dashboard, api] = await Promise.all([
     readFile(new URL("../app/cases-dashboard.tsx", import.meta.url), "utf8"),
-    readFile(
-      new URL("../app/api/cases/dashboard/route.ts", import.meta.url),
-      "utf8",
-    ),
+    readPython(casesApiUrl),
   ]);
+  const route = handlerSource(api, "def dashboard(");
   for (const field of [
     "monthlyCases",
     "companyName",
@@ -456,17 +467,12 @@ test("selected-month employee count expands monthly cases with safe routing", as
 });
 
 test("stale cases use a 30-day ongoing-only reminder and safe keep-active touch", async () => {
-  const [dashboard, route, patchRoute] = await Promise.all([
+  const [dashboard, api] = await Promise.all([
     readFile(new URL("../app/cases-dashboard.tsx", import.meta.url), "utf8"),
-    readFile(
-      new URL("../app/api/cases/dashboard/route.ts", import.meta.url),
-      "utf8",
-    ),
-    readFile(
-      new URL("../app/api/cases/[id]/route.ts", import.meta.url),
-      "utf8",
-    ),
+    readPython(casesApiUrl),
   ]);
+  const route = handlerSource(api, "def dashboard(");
+  const patchRoute = handlerSource(api, "def update_case(");
   assert.match(
     route,
     /status = 'ongoing' AND datetime\(updated_at\) <= datetime\(\?, '-30 days'\)/,
@@ -477,7 +483,7 @@ test("stale cases use a 30-day ongoing-only reminder and safe keep-active touch"
   );
   assert.match(route, /staleCount/);
   assert.match(route, /staleCases/);
-  assert.match(patchRoute, /body\.action === "keep_active"/);
+  assert.match(patchRoute, /action == "keep_active"/);
   const keepActiveSql =
     "UPDATE cases SET updated_at = ? WHERE id = ? AND status = 'ongoing'";
   assert.match(patchRoute, new RegExp(keepActiveSql.replace(/[?]/g, "\\?")));
@@ -672,52 +678,32 @@ test("invalid manual page ranges are shown inline and preserved in batch downloa
   assert.match(page, /catch \{\s*originals\.add\(source\);\s*\}/);
 });
 
-test("approval tracking schema, runtime initialization, and migration stay normalized", async () => {
-  const [schema, database, migration] = await Promise.all([
-    readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
-    readFile(new URL("../db/index.ts", import.meta.url), "utf8"),
-    readFile(
-      new URL("../drizzle/0003_steady_echo.sql", import.meta.url),
-      "utf8",
-    ),
-  ]);
+test("approval tracking schema and runtime initialization stay normalized", async () => {
+  const database = await readPython(casesDbUrl);
   for (const table of ["case_approval_documents", "registration_card_tracking"])
-    for (const source of [schema, database, migration])
-      assert.match(source, new RegExp(table));
+    assert.match(database, new RegExp(table));
+  assert.match(database, /UNIQUE\(case_id, agency\)/);
   assert.match(
-    schema,
-    /uniqueIndex\("case_approval_documents_case_agency_unique"\)/,
-  );
-  assert.match(schema, /index\("case_approval_documents_case_status_idx"\)/);
-  assert.match(
-    migration,
-    /FOREIGN KEY \(`case_id`\) REFERENCES `cases`\(`id`\)/,
+    database,
+    /CREATE INDEX IF NOT EXISTS case_approval_documents_case_status_idx/,
   );
   assert.match(
-    migration,
-    /CREATE UNIQUE INDEX `case_approval_documents_case_agency_unique`/,
+    database,
+    /FOREIGN KEY\(case_id\) REFERENCES cases\(id\) ON DELETE CASCADE/,
   );
-  assert.match(
-    migration,
-    /CREATE INDEX `case_approval_documents_case_status_idx`/,
+  // Approval rows and the registration card must not outlive their case.
+  assert.equal(
+    database.match(/FOREIGN KEY\(case_id\) REFERENCES cases\(id\) ON DELETE CASCADE/g)
+      ?.length,
+    2,
   );
-  assert.ok(
-    migration.indexOf("DELETE FROM `case_approval_documents`") <
-      migration.indexOf("DELETE FROM `cases`"),
-  );
-  assert.match(
-    migration,
-    /DELETE FROM `sqlite_sequence` WHERE `name` IN \('cases', 'case_approval_documents'\)/,
-  );
+  assert.match(database, /PRAGMA foreign_keys = ON/);
   assert.doesNotMatch(database, /INSERT OR IGNORE INTO cases/);
   assert.match(database, /INSERT OR IGNORE INTO employees/);
 });
 
 test("case-scoped approvals API validates and upserts metadata without file bytes", async () => {
-  const api = await readFile(
-    new URL("../app/api/cases/[id]/approvals/route.ts", import.meta.url),
-    "utf8",
-  );
+  const api = await readPython(casesApiUrl);
   for (const marker of [
     "not_received",
     "received",
@@ -734,9 +720,9 @@ test("case-scoped approvals API validates and upserts metadata without file byte
   assert.match(api, /SELECT id FROM cases WHERE id = \? LIMIT 1/);
   assert.match(api, /ON CONFLICT\(case_id, agency\) DO UPDATE/);
   assert.match(api, /ON CONFLICT\(case_id\) DO UPDATE/);
-  assert.match(api, /value === ""/);
+  assert.match(api, /value == ""/);
   assert.match(api, /UPDATE cases SET updated_at = \? WHERE id = \?/);
-  assert.match(api, /ownKeysOnly/);
+  assert.match(api, /own_keys_only/);
   assert.doesNotMatch(api, /base64|arrayBuffer|formData|file_bytes|blob/i);
 });
 

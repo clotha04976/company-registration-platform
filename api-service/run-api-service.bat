@@ -20,9 +20,9 @@ if not defined PYTHON_LAUNCHER (
 echo Using Python:
 call %PYTHON_LAUNCHER% --version
 
-powershell -NoProfile -Command "try { $health = Invoke-RestMethod -Uri 'http://127.0.0.1:8689/health' -TimeoutSec 3; if ($health.status -eq 'ok' -and $health.model -eq 'PP-OCRv6-small') { exit 0 }; exit 1 } catch { exit 1 }"
+powershell -NoProfile -Command "try { $health = Invoke-RestMethod -Uri 'http://127.0.0.1:8690/health' -TimeoutSec 3; if ($health.status -eq 'ok') { exit 0 }; exit 1 } catch { exit 1 }"
 if not errorlevel 1 (
-  echo OCR service is already running on http://127.0.0.1:8689.
+  echo Case API is already running on http://127.0.0.1:8690.
   echo Reusing the existing service.
   goto :eof
 )
@@ -30,12 +30,10 @@ if not errorlevel 1 (
 call "%~dp0setup-venv.bat"
 if errorlevel 1 goto :error
 
-set FLAGS_use_mkldnn=0
-set PADDLE_PDX_MODEL_SOURCE=BOS
-call .venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8689
+call .venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8690
 goto :eof
 
 :error
-echo OCR service setup failed.
+echo Case API setup failed.
 pause
 exit /b 1

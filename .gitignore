@@ -44,8 +44,10 @@ next-env.d.ts
 /tmp/
 /.private/
 
-# Python OCR service
+# Python services
 **/__pycache__/
 **/.pytest_cache/
 /ocr-service/.venv/
 /ocr-service/models/
+/api-service/.venv/
+/api-service/data/

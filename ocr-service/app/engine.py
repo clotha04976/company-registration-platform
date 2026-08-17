@@ -24,6 +24,16 @@ from .identity import (
 )
 
 
+def resolve_device() -> str:
+    """CPU unless ``OCR_DEVICE`` asks for something else.
+
+    Identity recognition processes one card per request, so CPU latency is
+    acceptable and the service stays installable without a CUDA-matched Paddle
+    build. Set ``OCR_DEVICE=gpu:0`` to opt back in.
+    """
+    return os.getenv("OCR_DEVICE", "").strip() or "cpu"
+
+
 @dataclass
 class CardResult:
     side: str
@@ -48,22 +58,10 @@ class IdentityOcrEngine:
             return self._ocr
         os.environ.setdefault("FLAGS_use_mkldnn", "0")
         os.environ.setdefault("PADDLE_PDX_MODEL_SOURCE", "BOS")
-        import paddle
         from paddleocr import PaddleOCR
 
-        configured_device = os.getenv("OCR_DEVICE", "").strip()
-        if configured_device:
-            device = configured_device
-        else:
-            device = (
-                "gpu:0"
-                if paddle.is_compiled_with_cuda()
-                and paddle.device.cuda.device_count() > 0
-                else "cpu"
-            )
-
         self._ocr = PaddleOCR(
-            device=device,
+            device=resolve_device(),
             enable_mkldnn=os.getenv("OCR_ENABLE_MKLDNN", "false").lower() == "true",
             text_detection_model_name="PP-OCRv6_small_det",
             text_recognition_model_name="PP-OCRv6_small_rec",

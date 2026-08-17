@@ -22,7 +22,15 @@ if not exist "node_modules\" (
 
 echo Starting the website...
 echo Keep this window open while using the website.
-start "Identity OCR Service" cmd /k call "%~dp0ocr-service\run-ocr-service.bat"
+echo The case API and identity OCR service start inside this window.
+
+rem The virtual environments are built here because the Vite plugin only starts
+rem services that already have one.
+if not exist "api-service\.venv\Scripts\python.exe" call "%~dp0api-service\setup-venv.bat"
+if not exist "ocr-service\.venv\Scripts\python.exe" (
+  if "%VITE_IDENTITY_OCR_URL%"=="" call "%~dp0ocr-service\setup-venv.bat"
+)
+
 call npm run dev -- --open
 
 if errorlevel 1 (
