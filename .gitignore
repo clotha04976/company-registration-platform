@@ -51,3 +51,7 @@ next-env.d.ts
 /ocr-service/models/
 /api-service/.venv/
 /api-service/data/
+
+# Real identity-card scans used for manual OCR checks; personal data must not
+# be pushed, and 76 MB of images would bloat the repository.
+/ocr-service/tests/身分證/

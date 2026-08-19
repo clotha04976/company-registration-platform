@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,6 +51,23 @@ def main() -> None:
     parser.add_argument("output", type=Path)
     parser.add_argument("--max-per-category", type=int, default=50)
     parser.add_argument(
+        "--folder-offset",
+        type=int,
+        default=0,
+        help="Skip this many sorted top-level customer folders.",
+    )
+    parser.add_argument(
+        "--max-folders",
+        type=int,
+        default=0,
+        help="Scan at most this many top-level customer folders; 0 means all.",
+    )
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        help="Resume into an existing manifest, skipping paths already collected.",
+    )
+    parser.add_argument(
         "--folder-prefix",
         action="append",
         default=[],
@@ -57,11 +75,22 @@ def main() -> None:
     )
     args = parser.parse_args()
     counts: Counter[str] = Counter()
-    records = []
+    existing_paths = set()
+    existing_records = []
+    if args.append and args.output.exists():
+        existing_records = [
+            json.loads(line)
+            for line in args.output.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        for record in existing_records:
+            counts[record["category"]] += 1
+            existing_paths.add(record["source_path"])
+    records = list(existing_records)
     top_folders = sorted(
         (path for path in args.source.iterdir() if path.is_dir()),
         key=lambda path: path.name,
-        reverse=True,
+        reverse=False,
     )
     if args.folder_prefix:
         top_folders = [
@@ -69,21 +98,42 @@ def main() -> None:
             for path in top_folders
             if any(path.name.startswith(prefix) for prefix in args.folder_prefix)
         ]
-    for customer_folder in top_folders:
-        if all(counts[name] >= args.max_per_category for name, _ in CATEGORIES):
-            break
-        for path in iter_files(customer_folder):
-            category = classify(path.name)
-            if not category or counts[category] >= args.max_per_category:
-                continue
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            records.append(
-                {
+    top_folders = top_folders[args.folder_offset :]
+    if args.max_folders:
+        top_folders = top_folders[: args.max_folders]
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    mode = "a" if args.append and args.output.exists() else "w"
+    scanned_folders = 0
+    with args.output.open(mode, encoding="utf-8") as stream:
+        for customer_folder in top_folders:
+            scanned_folders += 1
+            if scanned_folders % 25 == 0:
+                print(
+                    json.dumps(
+                        {"scanned_folders": scanned_folders, "counts": counts},
+                        ensure_ascii=False,
+                    ),
+                    file=sys.stderr,
+                    flush=True,
+                )
+            if all(counts[name] >= args.max_per_category for name, _ in CATEGORIES):
+                break
+            for path in iter_files(customer_folder):
+                category = classify(path.name)
+                source_path = str(path)
+                if (
+                    not category
+                    or counts[category] >= args.max_per_category
+                    or source_path in existing_paths
+                ):
+                    continue
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                record = {
                     "category": category,
-                    "source_path": str(path),
+                    "source_path": source_path,
                     "suffix": path.suffix.lower(),
                     "size_bytes": stat.st_size,
                     "modified_utc": datetime.fromtimestamp(
@@ -91,13 +141,21 @@ def main() -> None:
                     ).isoformat(),
                     "annotation_status": "pending",
                 }
-            )
-            counts[category] += 1
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    with args.output.open("w", encoding="utf-8") as stream:
-        for record in records:
-            stream.write(json.dumps(record, ensure_ascii=False) + "\n")
-    print(json.dumps({"total": len(records), "counts": counts}, ensure_ascii=False))
+                records.append(record)
+                existing_paths.add(source_path)
+                counts[category] += 1
+                stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+            stream.flush()
+    print(
+        json.dumps(
+            {
+                "total": len(records),
+                "counts": counts,
+                "scanned_folders": scanned_folders,
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 if __name__ == "__main__":
