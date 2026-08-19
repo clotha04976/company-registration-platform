@@ -7,6 +7,10 @@ mounts `app/page.tsx`, and the remaining screens live in `app/*.tsx` with styles
 `app/globals.css`. Shared extraction utilities are in `lib/`, declarations in `types/`,
 and frontend tests in `tests/`. Static assets belong in `public/`.
 
+`lib/business-items.mjs` is generated, not hand-written: rerun
+`node build/build-business-items.mjs` after refreshing
+`BusinessScopeCategories.json` from the GCIS open data set.
+
 Two local FastAPI services back the site. The case API lives in `api-service/app/`
 (`main.py` wires the app, `cases.py` holds the routes, `db.py` owns the SQLite schema)
 with tests in `api-service/tests/`. The identity OCR sidecar lives in `ocr-service/app/`

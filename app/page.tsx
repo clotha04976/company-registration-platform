@@ -12,10 +12,12 @@ import {
   FileText,
   Trash2,
   UploadCloud,
+  UserPlus,
 } from "lucide-react";
 import {
   buildDocx,
   buildRegistrationFormDocx,
+  buildShareholderConsentDocx,
   buildZip,
 } from "../lib/ooxml.mjs";
 import {
@@ -30,8 +32,12 @@ import {
 import { parsePrecheckText } from "../lib/precheck-extraction.mjs";
 import { recognizeIdentityWithService } from "../lib/identity-service.mjs";
 import { lookupTaiwanPostalCode } from "../lib/postal-code.mjs";
+import { buildShareholderConsent } from "../lib/shareholder-consent.mjs";
+import { businessItems } from "../lib/business-scope.mjs";
 import CasesDashboard from "./cases-dashboard";
 import ApprovalTracking from "./approval-tracking";
+import BusinessScopeField from "./business-scope-field";
+import FileThumbnails, { ThumbnailItem } from "./file-thumbnails";
 
 type SlotKey =
   | "identity"
@@ -102,6 +108,26 @@ type IdentityRecognition = {
 type PrecheckRecognition = {
   state: "idle" | "processing" | "success" | "review";
   message: string;
+};
+/**
+ * A 有限公司 may be founded by any number of shareholders, so the roster is a
+ * list rather than fixed fields. Each entry carries its own scans because every
+ * shareholder signs the 股東同意書 and appears on the registration form.
+ */
+type ShareholderDraft = {
+  key: string;
+  name: string;
+  nationalId: string;
+  birthDate: string;
+  address: string;
+  capital: string;
+  files: File[];
+};
+type ShareholderManual = {
+  name: boolean;
+  nationalId: boolean;
+  birthDate: boolean;
+  address: boolean;
 };
 type GeneratedKey =
   "registration_form" | "articles" | "shareholder" | "director" | "aml";
@@ -175,6 +201,7 @@ const initialForm = {
   registrationPostalCode: "",
   contactPostalCode: "330018",
   capital: "1,000,000",
+  representativeCapital: "",
 };
 const initialBusiness = [
   "E599010 配管工程業",
@@ -209,6 +236,66 @@ const identitySideLabels: Record<IdentityUploadSide, string> = {
   back: "身分證反面",
   combined: "正反面合併掃描／A4",
 };
+/**
+ * Which fields a scan can plausibly carry.
+ *
+ * The back of a 國民身分證 has no name and no birth date — the number only
+ * appears there as a barcode — so judging a back scan against the front's
+ * fields reports failures that are not failures.
+ */
+const identityFieldExpectation = (
+  side: IdentityUploadSide,
+): { required: string[]; optional: string[] } =>
+  side === "back"
+    ? { required: ["地址"], optional: ["證號"] }
+    : side === "front"
+      ? { required: ["姓名", "證號"], optional: ["生日"] }
+      : { required: ["姓名", "證號"], optional: ["生日", "地址"] };
+const identityExtractionState = (
+  side: IdentityUploadSide,
+  result: {
+    name: string;
+    nationalId: string;
+    birthDate: string;
+    address: string;
+    model: string;
+    nationalIdSource: string;
+  },
+): FileExtractionState => {
+  const values: Record<string, string> = {
+    姓名: result.name,
+    證號: result.nationalId,
+    生日: result.birthDate,
+    地址: result.address,
+  };
+  const expectation = identityFieldExpectation(side);
+  const expected = [...expectation.required, ...expectation.optional];
+  const found = expected.filter((field) => values[field]);
+  const missing = expected.filter((field) => !values[field]);
+  const complete = expectation.required.every((field) => values[field]);
+  const barcode =
+    result.nationalIdSource === "barcode" ? "（證號來自反面條碼）" : "";
+  return {
+    status: complete ? "success" : "review",
+    progress: 100,
+    method: result.model,
+    message: complete
+      ? `已取得${found.join("、")}${barcode}${missing.length ? `；未辨識${missing.join("、")}` : ""}，請人工確認。`
+      : `已取得${found.join("、") || "部分影像"}；未辨識${missing.join("、")}，請人工確認。`,
+  };
+};
+const amountValue = (value: string) =>
+  Number(String(value ?? "").replace(/[^\d]/g, "")) || 0;
+const formatAmount = (value: number) => value.toLocaleString("en-US");
+const newShareholder = (): ShareholderDraft => ({
+  key: `sh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  name: "",
+  nationalId: "",
+  birthDate: "",
+  address: "",
+  capital: "",
+  files: [],
+});
 
 const cityOutputs: OutputItem[] = [
   {
@@ -372,10 +459,33 @@ export default function Home() {
   const [detectionPageRanges, setDetectionPageRanges] = useState<
     Record<string, string>
   >({});
+  const [shareholders, setShareholders] = useState<ShareholderDraft[]>([]);
+  const [shareholderRecognition, setShareholderRecognition] = useState<
+    Record<string, IdentityRecognition>
+  >({});
+  const [businessAdded, setBusinessAdded] = useState(false);
+  // Keyed by "representative" or a shareholder key. Dropping two scans on one
+  // side zone used to keep the first and discard the rest without saying so,
+  // which reads exactly like "only one file was recognised".
+  const [uploadNotices, setUploadNotices] = useState<Record<string, string>>(
+    {},
+  );
   const addressManual = useRef(false);
   const activeAddressFiles = useRef(new Set<string>());
   const activeIdentityFiles = useRef<string[]>([]);
   const identityRun = useRef(0);
+  // Each scan carries its own token. A shared counter would cancel the front
+  // card's in-flight recognition the moment the back card is picked, which on
+  // CPU OCR is almost always still running.
+  const identityFileRuns = useRef<Record<string, number>>({});
+  const shareholdersRef = useRef<ShareholderDraft[]>([]);
+  const shareholderResults = useRef<
+    Record<string, Record<string, IdentityResult>>
+  >({});
+  const shareholderManual = useRef<Record<string, ShareholderManual>>({});
+  const shareholderRefs = useRef<
+    Record<string, Partial<Record<IdentityUploadSide, HTMLInputElement | null>>>
+  >({});
   const identityManual = useRef({
     representative: false,
     nationalId: false,
@@ -411,6 +521,17 @@ export default function Home() {
   });
 
   const validFiles = (key: SlotKey) => files[key].filter(supported);
+  const thumbnailItems = (key: SlotKey): ThumbnailItem[] =>
+    files[key].map((file, index) => ({
+      id: fileId(file),
+      file,
+      caption:
+        key === "identity"
+          ? identitySideLabels[
+              identityFileSides.current[fileId(file)] ?? "auto"
+            ]
+          : `第 ${index + 1} 份`,
+    }));
   const applyCandidates = (
     sourceFile: string,
     candidates: AddressCandidate[],
@@ -592,6 +713,24 @@ export default function Home() {
         message: "未辨識到有效的姓名與身分證字號，請於下一步人工輸入。",
       });
   };
+  const noteExtraUploads = (
+    target: string,
+    side: IdentityUploadSide,
+    accepted: File[],
+  ) =>
+    setUploadNotices((current) => ({
+      ...current,
+      [target]:
+        side !== "auto" && accepted.length > 1
+          ? `「${identitySideLabels[side]}」一次只收一個檔案，已採用「${accepted[0].name}」，其餘 ${accepted.length - 1} 個未使用；請放到對應的欄位。`
+          : "",
+    }));
+  /** Claims a fresh token for one scan, invalidating only that scan's earlier run. */
+  const beginIdentityRun = (file: File) => {
+    const run = ++identityRun.current;
+    identityFileRuns.current[fileId(file)] = run;
+    return run;
+  };
   const processIdentityFile = async (file: File, run: number) => {
     const id = fileId(file);
     setExtractions((current) => ({
@@ -609,7 +748,7 @@ export default function Home() {
         identityFileSides.current[id] ?? "auto",
       );
       if (
-        run !== identityRun.current ||
+        identityFileRuns.current[id] !== run ||
         !activeIdentityFiles.current.includes(id)
       )
         return;
@@ -617,7 +756,7 @@ export default function Home() {
         ? await lookupTaiwanPostalCode(serviceResult.address)
         : "";
       if (
-        run !== identityRun.current ||
+        identityFileRuns.current[id] !== run ||
         !activeIdentityFiles.current.includes(id)
       )
         return;
@@ -630,30 +769,12 @@ export default function Home() {
         nationalIdSource: serviceResult.nationalIdSource,
         sourceFile: file.name,
       };
-      const found = [
-        serviceResult.name && "姓名",
-        serviceResult.nationalId && "證號",
-        serviceResult.birthDate && "生日",
-        serviceResult.address && "地址",
-      ].filter(Boolean);
-      const missing = [
-        !serviceResult.name && "姓名",
-        !serviceResult.nationalId && "證號",
-        !serviceResult.birthDate && "生日",
-        !serviceResult.address && "地址",
-      ].filter(Boolean);
-      const complete = Boolean(serviceResult.name && serviceResult.nationalId);
       setExtractions((current) => ({
         ...current,
-        [id]: {
-          status: complete ? "success" : "review",
-          progress: 100,
-          method: serviceResult.model,
-          message:
-            complete
-              ? `辨識完成${serviceResult.nationalIdSource === "barcode" ? "（證號來自反面條碼）" : ""}，請人工確認`
-              : `已取得${found.join("、") || "部分影像"}；未辨識${missing.join("、")}，請人工確認。`,
-        },
+        [id]: identityExtractionState(
+          identityFileSides.current[id] ?? "auto",
+          serviceResult,
+        ),
       }));
       setIdentityResults((current) => {
         const next = { ...current, [id]: identity };
@@ -663,7 +784,7 @@ export default function Home() {
       return;
     } catch (error) {
       if (
-        run !== identityRun.current ||
+        identityFileRuns.current[id] !== run ||
         !activeIdentityFiles.current.includes(id)
       )
         return;
@@ -689,6 +810,285 @@ export default function Home() {
       });
     }
   };
+  // The roster is edited from async OCR callbacks as well as from the form, so
+  // the ref is the source of truth and the state is only its rendered mirror.
+  // Reading `shareholders` from a closure would drop whichever update landed
+  // between two events in the same tick.
+  const commitShareholders = (next: ShareholderDraft[]) => {
+    shareholdersRef.current = next;
+    setShareholders(next);
+  };
+  const patchShareholder = (key: string, patch: Partial<ShareholderDraft>) =>
+    commitShareholders(
+      shareholdersRef.current.map((entry) =>
+        entry.key === key ? { ...entry, ...patch } : entry,
+      ),
+    );
+  const editShareholder = (
+    key: string,
+    field: keyof ShareholderManual,
+    value: string,
+  ) => {
+    shareholderManual.current[key] = {
+      ...(shareholderManual.current[key] ?? {
+        name: false,
+        nationalId: false,
+        birthDate: false,
+        address: false,
+      }),
+      [field]: true,
+    };
+    patchShareholder(key, { [field]: value });
+  };
+  const applyShareholderResults = (shareholderKey: string) => {
+    const entry = shareholdersRef.current.find(
+      (item) => item.key === shareholderKey,
+    );
+    if (!entry) return;
+    const ordered = entry.files.map(fileId);
+    if (!ordered.length) {
+      setShareholderRecognition((current) => ({
+        ...current,
+        [shareholderKey]: { state: "idle", message: "" },
+      }));
+      return;
+    }
+    const selected = selectIdentityResult(
+      ordered,
+      shareholderResults.current[shareholderKey] ?? {},
+    );
+    if (selected.state === "processing") {
+      setShareholderRecognition((current) => ({
+        ...current,
+        [shareholderKey]: {
+          state: "processing",
+          message: "股東身分證辨識中。",
+        },
+      }));
+      return;
+    }
+    const parsed = selected.state === "review" ? undefined : selected;
+    const manual = shareholderManual.current[shareholderKey] ?? {
+      name: false,
+      nationalId: false,
+      birthDate: false,
+      address: false,
+    };
+    patchShareholder(shareholderKey, {
+      name: manual.name || !parsed?.name ? entry.name : parsed.name,
+      nationalId:
+        manual.nationalId || !parsed?.nationalId
+          ? entry.nationalId
+          : parsed.nationalId,
+      birthDate:
+        manual.birthDate || !parsed?.birthDate
+          ? entry.birthDate
+          : parsed.birthDate,
+      address:
+        manual.address || !parsed?.address ? entry.address : parsed.address,
+    });
+    setShareholderRecognition((current) => ({
+      ...current,
+      [shareholderKey]:
+        selected.state === "success"
+          ? {
+              state: "success",
+              message: `已辨識「${selected.sourceFile}」的姓名與身分證字號，請確認。`,
+            }
+          : selected.state === "partial"
+            ? {
+                state: "partial",
+                message:
+                  "只辨識到部分資料，未辨識欄位請人工輸入；既有手動資料不會被覆蓋。",
+              }
+            : {
+                state: "review",
+                message: "未辨識到有效的姓名與身分證字號，請人工輸入。",
+              },
+    }));
+  };
+  const processShareholderFile = async (
+    shareholderKey: string,
+    file: File,
+    run: number,
+  ) => {
+    const id = fileId(file);
+    const side = identityFileSides.current[id] ?? "auto";
+    const stale = () =>
+      identityFileRuns.current[id] !== run ||
+      !(
+        shareholdersRef.current.find((item) => item.key === shareholderKey)
+          ?.files ?? []
+      ).some((item) => fileId(item) === id);
+    const storeResult = (identity: IdentityResult) => {
+      shareholderResults.current[shareholderKey] = {
+        ...(shareholderResults.current[shareholderKey] ?? {}),
+        [id]: identity,
+      };
+      applyShareholderResults(shareholderKey);
+    };
+    setExtractions((current) => ({
+      ...current,
+      [id]: {
+        status: "pending",
+        progress: 0,
+        method: "PP-OCRv6 small",
+        message: "正在送至本機 OCR 服務",
+      },
+    }));
+    try {
+      const serviceResult = await runIdentityService(file, side);
+      if (stale()) return;
+      setExtractions((current) => ({
+        ...current,
+        [id]: identityExtractionState(side, serviceResult),
+      }));
+      storeResult({
+        name: serviceResult.name,
+        nationalId: serviceResult.nationalId,
+        birthDate: serviceResult.birthDate,
+        address: serviceResult.address,
+        nationalIdSource: serviceResult.nationalIdSource,
+        sourceFile: file.name,
+      });
+    } catch (error) {
+      if (stale()) return;
+      setExtractions((current) => ({
+        ...current,
+        [id]: {
+          status: "error",
+          progress: 100,
+          method: "OCR 服務連線失敗",
+          message:
+            error instanceof Error && error.message.includes("timed out")
+              ? "OCR 辨識逾時，請確認服務仍在執行後重試。"
+              : "無法連線本機 OCR 服務，請確認 OCR 視窗已啟動後重試。",
+        },
+      }));
+      storeResult({ name: "", nationalId: "", sourceFile: file.name });
+    }
+  };
+  const addShareholder = () =>
+    commitShareholders([...shareholdersRef.current, newShareholder()]);
+  const removeShareholder = (key: string) => {
+    const entry = shareholdersRef.current.find((item) => item.key === key);
+    for (const file of entry?.files ?? []) {
+      const id = fileId(file);
+      delete identityFileSides.current[id];
+      delete identityFileRuns.current[id];
+    }
+    delete shareholderResults.current[key];
+    delete shareholderManual.current[key];
+    delete shareholderRefs.current[key];
+    commitShareholders(
+      shareholdersRef.current.filter((item) => item.key !== key),
+    );
+    setShareholderRecognition((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  };
+  const addShareholderFiles = (
+    shareholderKey: string,
+    incoming: FileList | null,
+    side: IdentityUploadSide,
+  ) => {
+    if (!incoming?.length) return;
+    const accepted = Array.from(incoming).filter(
+      (file) => supported(file) && ["pdf", "jpg", "jpeg", "png"].includes(ext(file)),
+    );
+    if (!accepted.length) return;
+    const entry = shareholdersRef.current.find(
+      (item) => item.key === shareholderKey,
+    );
+    if (!entry) return;
+    // Each side holds one scan, so a second front replaces the first instead of
+    // stacking two cards nobody can tell apart.
+    noteExtraUploads(shareholderKey, side, accepted);
+    const added = accepted.slice(0, 1);
+    for (const file of added)
+      identityFileSides.current[fileId(file)] = side;
+    const kept = entry.files.filter(
+      (file) => identityFileSides.current[fileId(file)] !== side,
+    );
+    for (const file of entry.files)
+      if (!kept.includes(file)) {
+        const id = fileId(file);
+        delete shareholderResults.current[shareholderKey]?.[id];
+        delete identityFileRuns.current[id];
+      }
+    patchShareholder(shareholderKey, { files: [...kept, ...added] });
+    for (const file of added)
+      void processShareholderFile(
+        shareholderKey,
+        file,
+        beginIdentityRun(file),
+      );
+    applyShareholderResults(shareholderKey);
+  };
+  const removeShareholderFile = (shareholderKey: string, index: number) => {
+    const entry = shareholdersRef.current.find(
+      (item) => item.key === shareholderKey,
+    );
+    const removed = entry?.files[index];
+    if (!entry || !removed) return;
+    const id = fileId(removed);
+    delete identityFileSides.current[id];
+    delete identityFileRuns.current[id];
+    delete shareholderResults.current[shareholderKey]?.[id];
+    setExtractions((current) => {
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+    patchShareholder(shareholderKey, {
+      files: entry.files.filter((_, position) => position !== index),
+    });
+    applyShareholderResults(shareholderKey);
+  };
+  const otherShareholderCapital = shareholders.reduce(
+    (total, entry) => total + amountValue(entry.capital),
+    0,
+  );
+  // Left blank, the representative takes whatever the other shareholders did
+  // not subscribe, which is the usual case and keeps the two figures agreeing.
+  const representativeCapital =
+    form.representativeCapital ||
+    (amountValue(form.capital) > otherShareholderCapital
+      ? formatAmount(amountValue(form.capital) - otherShareholderCapital)
+      : "");
+  const roster = [
+    {
+      role: "董事",
+      name: form.representative,
+      nationalId: form.nationalId,
+      capital: representativeCapital,
+    },
+    ...shareholders.map((entry) => ({
+      role: "股東",
+      name: entry.name,
+      nationalId: entry.nationalId,
+      capital: entry.capital,
+    })),
+  ].filter((person) => person.name.trim());
+  const subscribedCapital =
+    amountValue(representativeCapital) + otherShareholderCapital;
+  const capitalMismatch =
+    Boolean(form.capital) && subscribedCapital !== amountValue(form.capital);
+  const shareholderConsent = () =>
+    buildShareholderConsent({
+      company: form.company,
+      directors: [form.representative].filter(Boolean),
+      capital: form.capital,
+      registrationAddress: form.registrationAddress,
+      shareholders: roster.map((person) => ({
+        name: person.name,
+        nationalId: person.nationalId,
+        capital: person.capital,
+      })),
+      topicKeys: ["incorporation"],
+    });
   const processPrecheckFile = async (file: File, run: number) => {
     const id = fileId(file);
     setExtractions((current) => ({
@@ -801,9 +1201,11 @@ export default function Home() {
           ["pdf", "jpg", "jpeg", "png"].includes(ext(file))),
     );
     if (!next.length) return;
-    if (key === "identity")
+    if (key === "identity") {
+      noteExtraUploads("representative", identitySide, next);
       for (const file of next)
         identityFileSides.current[fileId(file)] = identitySide;
+    }
     const selected =
       key === "identity" && identitySide !== "auto"
         ? [
@@ -822,7 +1224,6 @@ export default function Home() {
     }
     if (key === "identity") {
       activeIdentityFiles.current = selected.map(fileId);
-      const run = ++identityRun.current;
       const incomingIds = new Set(next.map(fileId));
       setIdentityRecognition({
         state: "processing",
@@ -839,7 +1240,8 @@ export default function Home() {
         applyIdentitySelection(refreshed);
         return refreshed;
       });
-      for (const file of next) void processIdentityFile(file, run);
+      for (const file of next)
+        void processIdentityFile(file, beginIdentityRun(file));
     }
     if (key === "name_reservation") {
       const file = selected[0];
@@ -873,8 +1275,8 @@ export default function Home() {
     if (slot === "identity") {
       const id = fileId(removed);
       delete identityFileSides.current[id];
+      delete identityFileRuns.current[id];
       activeIdentityFiles.current = nextFiles.map(fileId);
-      const run = ++identityRun.current;
       setExtractions((current) => {
         const next = { ...current };
         delete next[id];
@@ -887,7 +1289,8 @@ export default function Home() {
         return next;
       });
       for (const file of nextFiles)
-        if (!identityResults[fileId(file)]) void processIdentityFile(file, run);
+        if (!identityResults[fileId(file)])
+          void processIdentityFile(file, beginIdentityRun(file));
       return;
     }
     if (slot === "name_reservation") {
@@ -988,21 +1391,6 @@ export default function Home() {
   const docDefinition = (
     key: GeneratedKey,
   ): { name: string; lines: string[] } => {
-    if (key === "shareholder")
-      return {
-        name: `${form.company}股東同意書`,
-        lines: [
-          `茲同意設立${form.company}，訂定公司章程，並選任${form.representative}為董事。`,
-          `股東姓名：${form.representative}`,
-          "公司大章：＿＿＿＿＿＿＿＿",
-          "＿＿＿＿＿＿＿＿",
-          "＿＿＿＿＿＿＿＿",
-          "＿＿＿＿＿＿＿＿",
-          "＿＿＿＿＿＿＿＿",
-          "日期：民國＿＿年＿＿月＿＿日",
-          "提醒：日期為存入資本額日期，請先留空",
-        ],
-      };
     if (key === "director")
       return {
         name: "董事願任同意書",
@@ -1038,7 +1426,11 @@ export default function Home() {
         ...business.map((item, index) => `${index + 1}. ${item}`),
         "第三條　本公司所在地設於台中市，必要時得在國內外設立分公司。",
         "第四條　本公司之公告方法依照公司法第廿八條規定辦理。",
-        `第五條　本公司資本總額定為新台幣${form.capital}元整，全額繳足，各股東姓名、出資額如下：${form.representative}｜${form.capital}元整。`,
+        `第五條　本公司資本總額定為新台幣${form.capital}元整，全額繳足，各股東姓名、出資額如下：${
+          roster
+            .map((person) => `${person.name}｜${person.capital || form.capital}元整`)
+            .join("、") || "＿＿＿＿＿＿＿＿"
+        }。`,
         "第五條之一　本公司為業務需要得對外保證。",
         "第六條　股東非得其他股東表決權過半數之同意，不得以其出資之全部或一部，轉讓於他人。董事非得其他股東表決權三分之二以上之同意，不得以其出資之全部或一部，轉讓於他人。",
         "第七條　本公司股東每出資新台幣壹仟元，有一表決權。",
@@ -1061,8 +1453,19 @@ export default function Home() {
     if (key === "registration_form")
       return {
         name: `${form.company}有限公司設立登記表.docx`,
-        data: buildRegistrationFormDocx({ ...form, business }),
+        data: buildRegistrationFormDocx({
+          ...form,
+          business,
+          shareholders: roster,
+        }),
       };
+    if (key === "shareholder") {
+      const consent = shareholderConsent();
+      return {
+        name: `${consent.title}.docx`,
+        data: buildShareholderConsentDocx(consent),
+      };
+    }
     const def = docDefinition(key);
     return { name: `${def.name}.docx`, data: buildDocx(def.name, def.lines) };
   };
@@ -1182,8 +1585,16 @@ export default function Home() {
       registrationPostalCode: "",
       contactPostalCode: "",
       capital: "",
+      representativeCapital: "",
     });
     setBusiness([]);
+    setBusinessAdded(false);
+    setUploadNotices({});
+    commitShareholders([]);
+    setShareholderRecognition({});
+    shareholderResults.current = {};
+    shareholderManual.current = {};
+    shareholderRefs.current = {};
     setFiles(emptyFiles());
     setExtractions({});
     setIdentityResults({});
@@ -1211,6 +1622,7 @@ export default function Home() {
       contactPostalCode: "",
     };
     identityFileSides.current = {};
+    identityFileRuns.current = {};
     activePrecheckFile.current = "";
     precheckRun.current += 1;
     precheckManual.current = {
@@ -1329,6 +1741,10 @@ export default function Home() {
                           {slot.title} <em className="optional">可稍後補</em>
                         </strong>
                         <small>{slot.purpose}</small>
+                        <FileThumbnails
+                          items={thumbnailItems(slot.key)}
+                          emptyHint="尚未上傳。上傳後這裡會顯示縮圖，可先核對是否傳錯檔案。"
+                        />
                       </div>
                       {slot.key === "identity" ? (
                         <div className="identity-upload-grid">
@@ -1446,6 +1862,13 @@ export default function Home() {
                         )}
                       </div>
                       {slot.key === "identity" &&
+                        uploadNotices.representative && (
+                          <p className="business-warning" aria-live="polite">
+                            <AlertTriangle size={16} />
+                            <span>{uploadNotices.representative}</span>
+                          </p>
+                        )}
+                      {slot.key === "identity" &&
                         identityRecognition.state !== "idle" && (
                           <p
                             className={`recognition-note identity-${identityRecognition.state}`}
@@ -1468,6 +1891,215 @@ export default function Home() {
               </section>
             ),
           )}
+          <section className="source-phase shareholder-phase">
+            <div className="panel-heading">
+              <div>
+                <h3>股東身分證明文件</h3>
+                <p>
+                  負責人已列為第一位股東，其餘股東請逐位新增並上傳身分證。姓名與身分證字號會用於股東同意書與設立登記表，人數不限。
+                </p>
+              </div>
+              <button className="secondary small" onClick={addShareholder}>
+                <UserPlus size={15} />
+                新增股東
+              </button>
+            </div>
+            <div className="shareholder-lead">
+              <strong>
+                股東 1・負責人
+                <em className="optional">由上方負責人身分證帶入</em>
+              </strong>
+              <span>
+                {form.representative || "尚未辨識姓名"}
+                {form.nationalId ? `・${form.nationalId}` : ""}
+              </span>
+            </div>
+            {shareholders.map((entry, index) => (
+              <div className="shareholder-card" key={entry.key}>
+                <div className="shareholder-card-head">
+                  <strong>股東 {index + 2}</strong>
+                  <button
+                    className="secondary small danger"
+                    onClick={() => removeShareholder(entry.key)}
+                  >
+                    <Trash2 size={15} />
+                    移除此股東
+                  </button>
+                </div>
+                <div className="identity-upload-grid">
+                  {(["front", "back", "combined"] as const).map((side) => (
+                    <div
+                      className="slot-drop identity-drop"
+                      key={side}
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        addShareholderFiles(
+                          entry.key,
+                          event.dataTransfer.files,
+                          side,
+                        );
+                      }}
+                    >
+                      <input
+                        ref={(node) => {
+                          shareholderRefs.current[entry.key] = {
+                            ...shareholderRefs.current[entry.key],
+                            [side]: node,
+                          };
+                        }}
+                        type="file"
+                        accept=".pdf,.jpg,.jpeg,.png"
+                        onChange={(event) => {
+                          addShareholderFiles(
+                            entry.key,
+                            event.target.files,
+                            side,
+                          );
+                          event.target.value = "";
+                        }}
+                      />
+                      <button
+                        className="secondary small"
+                        onClick={() =>
+                          shareholderRefs.current[entry.key]?.[side]?.click()
+                        }
+                      >
+                        <UploadCloud size={15} />
+                        {identitySideLabels[side]}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <FileThumbnails
+                  items={entry.files.map((file) => ({
+                    id: fileId(file),
+                    file,
+                    caption:
+                      identitySideLabels[
+                        identityFileSides.current[fileId(file)] ?? "auto"
+                      ],
+                  }))}
+                  emptyHint="尚未上傳這位股東的身分證。"
+                />
+                <div className="slot-files">
+                  {entry.files.map((file, position) => (
+                    <div className="file-row" key={fileId(file)}>
+                      <FileText size={18} />
+                      <div>
+                        <strong>{file.name}</strong>
+                        <span>
+                          {ext(file).toUpperCase()}・{fileSize(file.size)}・
+                          {
+                            identitySideLabels[
+                              identityFileSides.current[fileId(file)] ?? "auto"
+                            ]
+                          }
+                        </span>
+                        {extractions[fileId(file)] && (
+                          <small
+                            className={`extraction-status ${extractions[fileId(file)].status}`}
+                          >
+                            {extractions[fileId(file)].method}・
+                            {extractions[fileId(file)].progress}%・
+                            {extractions[fileId(file)].message}
+                            <i>
+                              <b
+                                style={{
+                                  width: `${extractions[fileId(file)].progress}%`,
+                                }}
+                              />
+                            </i>
+                          </small>
+                        )}
+                      </div>
+                      <button aria-label="預覽" onClick={() => preview(file)}>
+                        <Eye size={16} />
+                      </button>
+                      <button
+                        aria-label="刪除"
+                        onClick={() =>
+                          removeShareholderFile(entry.key, position)
+                        }
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <div className="shareholder-fields">
+                  <label>
+                    <span>姓名</span>
+                    <input
+                      value={entry.name}
+                      onChange={(event) =>
+                        editShareholder(entry.key, "name", event.target.value)
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>身分證字號</span>
+                    <input
+                      value={entry.nationalId}
+                      onChange={(event) =>
+                        editShareholder(
+                          entry.key,
+                          "nationalId",
+                          event.target.value.toUpperCase(),
+                        )
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>出生日期（民國）</span>
+                    <input
+                      value={entry.birthDate}
+                      onChange={(event) =>
+                        editShareholder(
+                          entry.key,
+                          "birthDate",
+                          event.target.value,
+                        )
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>戶籍地址</span>
+                    <input
+                      value={entry.address}
+                      onChange={(event) =>
+                        editShareholder(
+                          entry.key,
+                          "address",
+                          event.target.value,
+                        )
+                      }
+                    />
+                  </label>
+                </div>
+                {uploadNotices[entry.key] && (
+                  <p className="business-warning" aria-live="polite">
+                    <AlertTriangle size={16} />
+                    <span>{uploadNotices[entry.key]}</span>
+                  </p>
+                )}
+                {shareholderRecognition[entry.key] &&
+                  shareholderRecognition[entry.key].state !== "idle" && (
+                    <p
+                      className={`recognition-note identity-${shareholderRecognition[entry.key].state}`}
+                      aria-live="polite"
+                    >
+                      {shareholderRecognition[entry.key].message}
+                    </p>
+                  )}
+              </div>
+            ))}
+            {!shareholders.length && (
+              <small className="pending">
+                只有負責人一位股東時不需要新增，股東同意書會只列出負責人。
+              </small>
+            )}
+          </section>
           {validFiles("address_bundle").length > 0 && (
             <section className="link-suggestions">
               <div className="panel-heading">
@@ -1623,7 +2255,13 @@ export default function Home() {
             公司所在地可以稍後補。只有下載需要地址的正式文件時，系統才會要求填寫；不會阻擋名稱預查階段。
           </p>
           <div className="form-grid">
-            {(Object.keys(form) as (keyof typeof form)[]).map((key) => (
+            {(Object.keys(form) as (keyof typeof form)[])
+              .filter(
+                // Shown in 股東出資明細 below, next to the other subscriptions.
+                (key): key is Exclude<keyof typeof form, "representativeCapital"> =>
+                  key !== "representativeCapital",
+              )
+              .map((key) => (
               <label key={key}>
                 <span>
                   {
@@ -1740,42 +2378,121 @@ export default function Home() {
             ))}
           </div>
           <section className="business-section">
-            <h3>所營事業項目</h3>
-            {business.map((item, index) => (
-              <div className="business-list" key={`${index}-${item}`}>
-                <input
+            <div className="business-heading">
+              <div>
+                <h3>所營事業項目</h3>
+                <p>
+                  依經濟部公司行號營業項目代碼表（共 {businessItems.length}{" "}
+                  項）搜尋，可輸入代碼或名稱。順序即為登記表上的編號。
+                </p>
+              </div>
+              <button
+                className="secondary small"
+                onClick={() => {
+                  precheckManual.current.business = true;
+                  setBusinessAdded(true);
+                  setBusiness((current) => [...current, ""]);
+                }}
+              >
+                新增營業項目
+              </button>
+            </div>
+            {businessAdded && (
+              <p className="business-warning" aria-live="polite">
+                <AlertTriangle size={16} />
+                <span>
+                  目前的營業項目
+                  {validFiles("name_reservation").length
+                    ? "是依已上傳的名稱預查核定書帶入"
+                    : "尚未取得名稱預查核定書，是人工填寫的"}
+                  。新增項目後會與核定書不一致，送件前請先到經濟部辦理「預查馬上辦」重新核定所營事業。
+                </span>
+              </p>
+            )}
+            <div className="business-list">
+              {business.map((item, index) => (
+                <BusinessScopeField
+                  key={`business-${index}`}
+                  index={index}
                   value={item}
-                  onChange={(event) => {
+                  onChange={(next) => {
                     precheckManual.current.business = true;
                     setBusiness((current) =>
-                      current.map((entry, i) =>
-                        i === index ? event.target.value : entry,
+                      current.map((entry, position) =>
+                        position === index ? next : entry,
                       ),
                     );
                   }}
-                />
-                <button
-                  className="secondary small"
-                  onClick={() => {
+                  onRemove={() => {
                     precheckManual.current.business = true;
                     setBusiness((current) =>
-                      current.filter((_, i) => i !== index),
+                      current.filter((_, position) => position !== index),
                     );
                   }}
-                >
-                  刪除
-                </button>
+                />
+              ))}
+              {!business.length && (
+                <small className="pending">
+                  尚未有營業項目。上傳名稱預查核定書後會自動帶入，也可以手動新增。
+                </small>
+              )}
+            </div>
+          </section>
+          <section className="business-section">
+            <div className="business-heading">
+              <div>
+                <h3>股東出資明細</h3>
+                <p>
+                  出資額合計須等於資本總額。負責人欄位留空時，會自動填入資本總額扣除其他股東後的餘額。
+                </p>
               </div>
-            ))}
-            <button
-              className="secondary small"
-              onClick={() => {
-                precheckManual.current.business = true;
-                setBusiness((current) => [...current, ""]);
-              }}
+            </div>
+            <div className="capital-list">
+              <div>
+                <span>1</span>
+                <strong>{form.representative || "（負責人）"}</strong>
+                <em>董事</em>
+                <input
+                  aria-label="負責人出資額"
+                  value={form.representativeCapital}
+                  placeholder={representativeCapital || "出資額"}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      representativeCapital: event.target.value,
+                    }))
+                  }
+                />
+              </div>
+              {shareholders.map((entry, index) => (
+                <div key={entry.key}>
+                  <span>{index + 2}</span>
+                  <strong>{entry.name || "（未辨識姓名）"}</strong>
+                  <em>股東</em>
+                  <input
+                    aria-label={`股東 ${index + 2} 出資額`}
+                    value={entry.capital}
+                    placeholder="出資額"
+                    onChange={(event) =>
+                      patchShareholder(entry.key, {
+                        capital: event.target.value,
+                      })
+                    }
+                  />
+                </div>
+              ))}
+            </div>
+            <p
+              className={capitalMismatch ? "business-warning" : "capital-total"}
+              aria-live="polite"
             >
-              新增營業項目
-            </button>
+              {capitalMismatch && <AlertTriangle size={16} />}
+              <span>
+                出資額合計 {formatAmount(subscribedCapital)} 元／資本總額{" "}
+                {form.capital || "未填"} 元
+                {capitalMismatch ? "，兩者不一致，請調整後再送件。" : "。"}
+              </span>
+            </p>
           </section>
           <footer className="stage-actions">
             <div className="stage-actions-left">

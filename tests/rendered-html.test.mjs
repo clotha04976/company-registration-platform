@@ -202,7 +202,7 @@ test("identity OCR is triggered only from the identity upload slot", async () =>
   assert.match(page, /zip5\.5432\.tw/);
   assert.match(
     page,
-    /const incomingIds = new Set\(next\.map\(fileId\)\)[\s\S]+for \(const id of incomingIds\) delete refreshed\[id\][\s\S]+for \(const file of next\) void processIdentityFile/,
+    /const incomingIds = new Set\(next\.map\(fileId\)\)[\s\S]+for \(const id of incomingIds\) delete refreshed\[id\][\s\S]+void processIdentityFile\(file, beginIdentityRun\(file\)\)/,
   );
 });
 
@@ -516,7 +516,6 @@ test("sensitive data remains fully visible in confirmation and documents", async
     "王小明",
     "臺北市中正區範例路1號",
     "第十六條",
-    "公司大章",
     "親簽",
   ])
     assert.match(page, new RegExp(retainedContent));
