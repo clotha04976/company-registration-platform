@@ -192,6 +192,23 @@ export default function AccountingOfficeManager({
               <div><p className="eyebrow">{editor.id ? "EDIT OFFICE" : "NEW OFFICE"}</p><h3>{editor.id ? "編輯事務所" : "新增事務所"}</h3></div>
               <button type="button" className="erp-icon-button" aria-label="關閉編輯" onClick={() => setEditor(null)}><X size={16} /></button>
             </div>
+            <div className="office-editor-status">
+              <div className="office-editor-status-heading">
+                <span className="eyebrow">STATUS</span>
+                <strong>狀態與套用設定</strong>
+                <small>決定這間事務所是否出現在選單，以及是否自動帶入購票證明。</small>
+              </div>
+              <div className="office-editor-status-options">
+                <label className={`office-check-card${editor.form.isDefault ? " selected" : ""}`}>
+                  <input type="checkbox" checked={editor.form.isDefault} onChange={(event) => patch("isDefault", event.target.checked)} />
+                  <span><strong>設為預設事務所</strong><small>新增購票證明時自動帶入</small></span>
+                </label>
+                <label className={`office-check-card${editor.form.active ? " selected" : ""}`}>
+                  <input type="checkbox" checked={editor.form.active} onChange={(event) => patch("active", event.target.checked)} />
+                  <span><strong>目前啟用</strong><small>停用後不會出現在案件選單</small></span>
+                </label>
+              </div>
+            </div>
             <div className="erp-form-grid">
               <label className="span-2">事務所完整名稱<input required value={editor.form.name} onChange={(event) => patch("name", event.target.value)} /></label>
               <label>簡稱<input value={editor.form.shortName} onChange={(event) => patch("shortName", event.target.value)} /></label>
@@ -204,8 +221,6 @@ export default function AccountingOfficeManager({
               <label>電話<input value={editor.form.phone} onChange={(event) => patch("phone", event.target.value)} /></label>
               <label className="span-2">地址<input value={editor.form.address} onChange={(event) => patch("address", event.target.value)} /></label>
               <label className="span-2">電子郵件<input type="email" value={editor.form.email} onChange={(event) => patch("email", event.target.value)} /></label>
-              <label className="check-row"><input type="checkbox" checked={editor.form.isDefault} onChange={(event) => patch("isDefault", event.target.checked)} />設為預設事務所</label>
-              <label className="check-row"><input type="checkbox" checked={editor.form.active} onChange={(event) => patch("active", event.target.checked)} />目前啟用</label>
             </div>
             <footer className="erp-form-actions">
               <button type="button" className="secondary" onClick={() => setEditor(null)}>取消</button>
