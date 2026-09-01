@@ -39,6 +39,10 @@ if not exist "ocr-service\.venv\Scripts\python.exe" (
   if "%VITE_IDENTITY_OCR_URL%"=="" call "%~dp0ocr-service\setup-venv.bat"
 )
 
+if not exist "ocr-service\.captcha-venv\Scripts\python.exe" (
+  call "%~dp0ocr-service\setup-captcha-venv.bat"
+)
+
 call npm run dev -- --open
 
 if errorlevel 1 (

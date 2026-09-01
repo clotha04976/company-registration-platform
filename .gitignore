@@ -48,6 +48,7 @@ next-env.d.ts
 **/__pycache__/
 **/.pytest_cache/
 /ocr-service/.venv/
+/ocr-service/.captcha-venv/
 /ocr-service/models/
 /data/
 /backups/

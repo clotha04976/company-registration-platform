@@ -9,6 +9,8 @@ import { DatabaseSync, backup } from "node:sqlite";
 import { OfficialQueryError, queryOfficialCases } from "./official-query.mjs";
 import { generatePurchaseProofDocx } from "./purchase-proof-docx.mjs";
 import { TaxQueryError, createTaxCaptcha, queryTaxCases, taxBureaus, taxQueryUrl } from "./tax-query.mjs";
+import { closeCaptchaOcr, recognizeTaxCaptcha } from "./captcha-ocr.mjs";
+import { inferTaxBureau, inferTaxJurisdiction } from "./lib/tax-jurisdiction.mjs";
 
 const rootDir = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(rootDir, "dist");
@@ -589,7 +591,8 @@ function casePayload(input, { backfill = false } = {}) {
   const entityType = cleanText(input.entityType, 10) || "公司";
   const status = cleanText(input.status, 30) || "準備中";
   const taxOfficeRequired = cleanText(input.taxOfficeRequired, 10) || "未確認";
-  const taxBureauCode = cleanText(input.taxBureauCode, 3).toUpperCase();
+  const inferredTaxBureau = inferTaxBureau(input.address);
+  const taxBureauCode = cleanText(input.taxBureauCode, 3).toUpperCase() || inferredTaxBureau?.bureauCode || "";
   const regUnitCode = cleanText(input.regUnitCode, 10) || "17";
   const officialReceiptNo = cleanText(input.officialReceiptNo, 50);
   const payload = {
@@ -826,11 +829,13 @@ function purchaseProofForCase(id, item = getCase.get(id)) {
   const official = rocDateParts(nationalTax?.approvalDate || "");
   const application = defaultPurchaseDate();
   const defaultOffice = listAccountingOffices.all().find((office) => Boolean(office.active) && Boolean(office.isDefault));
+  const businessAddress = preparation?.registrationAddress || item.address || "";
+  const jurisdiction = inferTaxJurisdiction(businessAddress);
   return {
     case: {
       id: item.id, caseNumber: item.caseNumber, companyName: item.companyName,
       taxId: item.taxId, representative: preparation?.representative || item.representative || "",
-      address: preparation?.registrationAddress || item.address || "",
+      address: businessAddress,
     },
     settings: {
       officeId: stored?.officeId || defaultOffice?.id || null,
@@ -839,8 +844,8 @@ function purchaseProofForCase(id, item = getCase.get(id)) {
       responsiblePersonId: stored?.responsiblePersonId || preparation?.nationalId || "",
       businessPhone: stored?.businessPhone || preparation?.contactPhone || "",
       email: stored?.email || "",
-      taxBureauName: stored?.taxBureauName || taxBureaus[item.taxBureauCode]?.shortName?.replace(/^臺北$/, "台北") || "",
-      branchName: stored?.branchName || "",
+      taxBureauName: stored?.taxBureauName || jurisdiction?.bureauShortName || taxBureaus[item.taxBureauCode]?.shortName?.replace(/^臺北$/, "台北") || "",
+      branchName: stored?.branchName || jurisdiction?.branchName || "",
       salesDocumentNumber: stored?.salesDocumentNumber || "",
       applicationDate: {
         year: stored?.applicationYear || application.year,
@@ -856,6 +861,7 @@ function purchaseProofForCase(id, item = getCase.get(id)) {
       checkboxes: stored ? parseStoredObject(stored.checkboxesJson) : defaultPurchaseProofCheckboxes,
       generatedAt: stored?.generatedAt || "", updatedAt: stored?.updatedAt || "",
     },
+    suggestedJurisdiction: jurisdiction,
     nationalTaxApprovalReceived: ["received", "archived"].includes(nationalTax?.status),
   };
 }
@@ -1528,9 +1534,55 @@ async function handleApi(request, response, url) {
     if (!current) throw new HttpError(404, "找不到這筆案件");
     if (!/^\d{8}$/.test(current.taxId || "")) throw new HttpError(400, "這筆案件沒有統編，無法查詢國稅局進度");
     const input = await readJson(request);
-    const bureauCode = cleanText(input.bureauCode || current.taxBureauCode, 3).toUpperCase();
+    const bureauCode = cleanText(input.bureauCode || current.taxBureauCode || inferTaxBureau(current.address)?.bureauCode, 3).toUpperCase();
     if (!taxBureauCodes.has(bureauCode)) throw new HttpError(400, "請先選擇臺北、北區、中區、南區或高雄國稅局");
     let captcha;
+    let ocrFailure = "";
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        captcha = await createTaxCaptcha({ bureauCode });
+        const captchaText = await recognizeTaxCaptcha(captcha.image);
+        if (!/^[0-9A-Z]{4,6}$/.test(captchaText)) {
+          ocrFailure = "驗證碼辨識結果格式不符";
+          continue;
+        }
+        const candidates = await queryTaxCases({
+          bureauCode,
+          taxId: current.taxId,
+          businessName: current.companyName,
+          captchaText,
+          captcha: { nonce: captcha.nonce, token: captcha.token },
+        });
+        if (!candidates.length) {
+          sendJson(response, 201, {
+            ok: true, automatic: true, sessionId: "", bureauCode,
+            bureauName: taxBureaus[bureauCode].name, results: [],
+            message: "驗證碼已自動辨識；官方網站查無一年內案件，請確認統編與營業人名稱",
+          });
+          return true;
+        }
+        const sessionId = saveSession(taxQuerySessions, {
+          caseId: id, bureauCode, captcha: null, image: null,
+          mimeType: captcha.mimeType, queried: true, candidates,
+        }, 10 * 60_000);
+        sendJson(response, 201, {
+          ok: true, automatic: true, sessionId, bureauCode,
+          bureauName: taxBureaus[bureauCode].name,
+          results: taxCandidatesForClient(current, candidates),
+          message: `已自動辨識驗證碼，查到 ${candidates.length} 筆國稅局案件`,
+        });
+        return true;
+      } catch (error) {
+        if (error instanceof TaxQueryError && error.code === "CAPTCHA_INVALID") {
+          ocrFailure = error.message;
+          continue;
+        }
+        if (error instanceof TaxQueryError) throw new HttpError(error.status, error.message, error.code);
+        console.warn("驗證碼 OCR 自動辨識失敗：", error instanceof Error ? error.message : error);
+        ocrFailure = "驗證碼自動辨識暫時無法使用";
+        break;
+      }
+    }
     try {
       captcha = await createTaxCaptcha({ bureauCode });
     } catch (error) {
@@ -1553,6 +1605,9 @@ async function handleApi(request, response, url) {
       bureauName: taxBureaus[bureauCode].name,
       captchaUrl: `/api/tax-query-sessions/${sessionId}/captcha`,
       officialUrl: taxQueryUrl(bureauCode),
+      automatic: false,
+      results: [],
+      message: `${ocrFailure || "驗證碼自動辨識未成功"}；請人工輸入圖片文字後查詢。`,
     });
     return true;
   }
@@ -1736,6 +1791,7 @@ const server = createServer(async (request, response) => {
 server.on("error", (error) => {
   if (error.code === "EADDRINUSE") console.error(`無法啟動：連接埠 ${port} 已被其他程式使用。`);
   else console.error("系統啟動失敗：", error);
+  closeCaptchaOcr();
   db.close();
   process.exit(1);
 });
@@ -1767,6 +1823,6 @@ server.listen(port, host, () => {
   }
 });
 
-function shutdown() { server.close(() => { db.close(); process.exit(0); }); }
+function shutdown() { server.close(() => { closeCaptchaOcr(); db.close(); process.exit(0); }); }
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Building2, CheckCircle2, Download, FileText, Save, Settings2 } from "lucide-react";
 import AccountingOfficeManager, { AccountingOffice } from "./accounting-office-manager";
+import { purchaseProofOfficeOptions } from "../lib/tax-jurisdiction.mjs";
 
 type RocDate = { year: string; month: string; day: string };
 type PurchaseSettings = {
@@ -30,6 +31,10 @@ type PurchaseData = {
     address: string;
   };
   settings: PurchaseSettings;
+  suggestedJurisdiction: {
+    bureauCode: string; bureauName: string; bureauShortName: string; county: string;
+    branchName: string; branchCandidates: string[]; needsBranchConfirmation: boolean;
+  } | null;
   offices: AccountingOffice[];
   nationalTaxApprovalReceived: boolean;
 };
@@ -149,6 +154,7 @@ export default function PurchaseProofApplication({ caseId }: { caseId: number })
   }, [load]);
 
   const activeOffices = useMemo(() => data?.offices.filter((office) => office.active) ?? [], [data]);
+  const branchOptions = useMemo(() => form ? purchaseProofOfficeOptions(form.taxBureauName) : [], [form]);
   const patch = <K extends keyof PurchaseSettings>(key: K, value: PurchaseSettings[K]) =>
     setForm((current) => current ? { ...current, [key]: value } : current);
 
@@ -243,10 +249,11 @@ export default function PurchaseProofApplication({ caseId }: { caseId: number })
       <label>公司負責人身分證字號<input maxLength={10} value={form.responsiblePersonId} onChange={(event) => patch("responsiblePersonId", event.target.value.toUpperCase())} /></label>
       <label>營業人電話<input value={form.businessPhone} onChange={(event) => patch("businessPhone", event.target.value)} /></label>
       <label>營業人電子郵件<input type="email" value={form.email} onChange={(event) => patch("email", event.target.value)} /></label>
-      <label>國稅局<select value={form.taxBureauName} onChange={(event) => patch("taxBureauName", event.target.value)}><option value="">請選擇</option>{["台北", "北區", "中區", "南區", "高雄"].map((name) => <option key={name}>{name}</option>)}</select></label>
-      <label>分局／稽徵所名稱<input value={form.branchName} onChange={(event) => patch("branchName", event.target.value)} /></label>
+      <label>國稅局<small className="erp-field-hint">依營業地址自動帶入</small><select value={form.taxBureauName} onChange={(event) => setForm({ ...form, taxBureauName: event.target.value, branchName: "" })}><option value="">請選擇</option>{["台北", "北區", "中區", "南區", "高雄"].map((name) => <option key={name}>{name}</option>)}</select></label>
+      <label>分局／稽徵所名稱<small className="erp-field-hint">購票證使用，可手動修正</small><input list={`purchase-tax-office-${caseId}`} value={form.branchName} onChange={(event) => patch("branchName", event.target.value)} /><datalist id={`purchase-tax-office-${caseId}`}>{branchOptions.map((name) => <option key={name} value={name} />)}</datalist></label>
       <label className="span-2">公文銷售字號<input value={form.salesDocumentNumber} onChange={(event) => patch("salesDocumentNumber", event.target.value)} placeholder="只輸入字號數字" /></label>
     </div>
+    {data.suggestedJurisdiction?.needsBranchConfirmation && <p className="purchase-office-warning"><Building2 size={16} />臺北市中山區須依松江路東、西側確認，請從「中北稽徵所／中南稽徵所」選擇正確單位。</p>}
     <div className="purchase-date-grid"><DateFields label="申請日期" value={form.applicationDate} onChange={(value) => patch("applicationDate", value)} /><DateFields label="國稅局公文日期" value={form.officialDate} onChange={(value) => patch("officialDate", value)} /></div>
     <div className="purchase-page-options">{pages.map(([id, title]) => <label key={id} className={form.selectedPages.includes(id) ? "selected" : ""}><input type="checkbox" checked={form.selectedPages.includes(id)} onChange={() => togglePage(id)} /><span>第 {id} 頁</span><strong>{title}</strong></label>)}</div>
     <div className="purchase-checkbox-groups">{checkboxGroups.map((group) => <fieldset key={group.title}><legend>{group.title}</legend><div>{group.options.map(([path, label]) => <label key={path}><input type={group.single ? "radio" : "checkbox"} name={group.single ? group.title : undefined} checked={nestedBoolean(form.checkboxes, path)} onChange={(event) => toggleCheckbox(path, event.target.checked, group)} /><span>{label}</span></label>)}</div></fieldset>)}</div>

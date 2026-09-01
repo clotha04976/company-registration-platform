@@ -1,6 +1,6 @@
 # 工商案件管理台帳
 
-以案件進度為核心的本機工商登記工作台。React 負責台帳、完整進度、OCR 資料確認與文件產出；Node.js 負責案件 API、官方進度查詢、提醒、請款與 SQLite；Python 僅保留常駐的 PaddleOCR 身分證辨識服務。
+以案件進度為核心的本機工商登記工作台。React 負責台帳、完整進度、OCR 資料確認與文件產出；Node.js 負責案件 API、官方進度查詢、提醒、請款與 SQLite；Python 只負責 PaddleOCR 身分證辨識與 ddddocr 驗證碼辨識。
 
 ## 技術棧
 
@@ -8,8 +8,8 @@
 | --- | --- | --- |
 | 前端 | React 19、TypeScript、Vite 8 | 案件台帳、資料準備、文件產生、核准追蹤 |
 | 案件後端 | Node.js 22.17+ 內建 HTTP、`node:sqlite` | REST API、完整進度、提醒、收款、備份 |
-| RPA 查詢 | Node.js `fetch` + HTML 解析 | 市政府與國稅局官方進度；國稅局驗證碼由人員輸入 |
-| OCR | FastAPI、PaddleOCR | 本機身分證辨識 sidecar，模型常駐記憶體 |
+| RPA 查詢 | Node.js `fetch` + ddddocr | 市政府與國稅局官方進度；驗證碼本機辨識，失敗時人工修正 |
+| OCR | FastAPI、PaddleOCR、ddddocr | 身分證辨識 sidecar；國稅局驗證碼使用輕量常駐 Python worker |
 | 資料庫 | SQLite | 本機案件、歷程、資料準備與核准追蹤 |
 | 文件處理 | pdf.js、Tesseract.js、pdf-lib、OOXML、fflate | PDF 擷取、一般文件 OCR、DOCX 與 ZIP 產出 |
 
@@ -45,6 +45,7 @@ npm start
 - `npm run lint`：執行 ESLint
 - `npm run backup`：建立 SQLite 備份
 - `ocr-service\run-ocr-service.bat`：單獨啟動 OCR
+- `ocr-service\setup-captcha-venv.bat`：單獨安裝國稅局驗證碼辨識環境
 - `ocr-service\.venv\Scripts\python -m unittest discover -s tests`：OCR 測試
 
 ## 資料與隱私
@@ -70,4 +71,4 @@ npm start
 
 購票證明資料會保存在案件自己的 `case_purchase_proof` 紀錄，Word 使用已去除固定事務所個資的通用範本，在下載當下才從 SQLite 主檔帶入。案件未收到國稅局核准公文時，後端會拒絕產生文件，避免流程跳步。
 
-一般 PDF 擷取與文件分類在瀏覽器執行；身分證辨識走本機 OCR。國稅局查詢遇到驗證碼時，系統顯示官方驗證碼讓承辦人輸入，不嘗試以 AI 繞過。
+一般 PDF 擷取與文件分類在瀏覽器執行；身分證辨識走本機 OCR。國稅局查詢會依營業地址自動選擇五區國稅局，使用本機 ddddocr 辨識官方驗證碼並直接查詢；連續辨識失敗時才顯示圖片讓承辦人修正。
