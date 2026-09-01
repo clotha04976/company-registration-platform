@@ -2,8 +2,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   BadgeDollarSign, Building2, CalendarClock, CheckCircle2, ChevronDown,
   CircleAlert, ClipboardList, FileSearch, FileText, PanelLeft, Pencil, Plus,
-  ReceiptText, RefreshCw, Search, WalletCards, X,
+  ReceiptText, RefreshCw, Search, Settings2, WalletCards, X,
 } from "lucide-react";
+import AccountingOfficeManager from "./accounting-office-manager";
 
 export type CaseItem = {
   id: number; caseNumber: string; receivedDate: string; year: number;
@@ -132,6 +133,7 @@ export default function CasesDashboard({ onOpenWizard }: { onOpenWizard: (item: 
   } | null>(null);
   const [busy, setBusy] = useState(false);
   const [navOpen, setNavOpen] = useState(true);
+  const [officeManagerOpen, setOfficeManagerOpen] = useState(false);
 
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
@@ -280,6 +282,7 @@ export default function CasesDashboard({ onOpenWizard }: { onOpenWizard: (item: 
       <nav>
         <button className="erp-nav-item active" title="案件管理" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}><ClipboardList size={19} /><span className="erp-nav-label">案件管理</span></button>
         <button className="erp-nav-item" title="請款與收款" onClick={() => document.getElementById("erp-billing")?.scrollIntoView({ behavior: "smooth" })}><WalletCards size={19} /><span className="erp-nav-label">請款與收款</span></button>
+        <button className="erp-nav-item" title="事務所設定" onClick={() => setOfficeManagerOpen(true)}><Settings2 size={19} /><span className="erp-nav-label">事務所設定</span></button>
         <a className="erp-nav-item" href="/api/backup" title="下載資料備份"><FileText size={19} /><span className="erp-nav-label">下載資料備份</span></a>
       </nav>
       <div className="erp-sidebar-spacer" />
@@ -311,6 +314,7 @@ export default function CasesDashboard({ onOpenWizard }: { onOpenWizard: (item: 
     {officialSelection && <Modal title="選擇官方案件" eyebrow="OFFICIAL RESULTS" wide onClose={() => setOfficialSelection(null)}><div className="erp-result-list">{officialSelection.candidates.map((candidate) => <button key={candidate.index} disabled={busy} onClick={() => void applyOfficial(candidate.index)}><strong>{candidate.companyName || "名稱未提供"}</strong><span>{candidate.receiptNo || "無收文號"}・{candidate.receivedDate || "日期不明"}</span><small>{candidate.officialStatus || candidate.subject || "進度未提供"}・{candidate.authority || "受理機關未提供"}</small></button>)}</div></Modal>}
 
     {taxDialog && <Modal title="國稅局進度查詢" eyebrow="TAX OFFICE" wide onClose={() => setTaxDialog(null)}><form onSubmit={submitTax}><div className="erp-tax-query"><label>主管國稅局<select value={taxDialog.bureauCode} onChange={(event) => setTaxDialog({ ...taxDialog, bureauCode: event.target.value, sessionId: "", captchaUrl: "", results: [] })}><option value="">請選擇</option>{taxBureaus.map((bureau) => <option value={bureau.value} key={bureau.value}>{bureau.label}</option>)}</select></label><button type="button" className="secondary" disabled={!taxDialog.bureauCode || taxDialog.busy} onClick={() => void loadTaxCaptcha()}>{taxDialog.captchaUrl ? "換一張驗證碼" : "載入驗證碼"}</button>{taxDialog.captchaUrl && <img src={taxDialog.captchaUrl} alt="國稅局圖形驗證碼" onClick={() => void loadTaxCaptcha()} />}<label>驗證碼<input autoComplete="off" maxLength={6} value={taxDialog.captchaText} onChange={(event) => setTaxDialog({ ...taxDialog, captchaText: event.target.value })} /></label><button className="primary" disabled={!taxDialog.sessionId || !taxDialog.captchaText || taxDialog.busy}>{taxDialog.busy ? "查詢中…" : "查詢案件"}</button></div></form><p className="erp-query-message">{taxDialog.message}</p>{!!taxDialog.results.length && <div className="erp-result-list">{taxDialog.results.map((candidate) => <button key={candidate.index} disabled={taxDialog.busy} onClick={() => void applyTax(candidate.index)}><strong>{candidate.businessName}</strong><span>{candidate.receiptNo}・{candidate.receivedDate}</span><small>{candidate.caseType}・{candidate.officialStatus}</small></button>)}</div>}</Modal>}
+    {officeManagerOpen && <AccountingOfficeManager onClose={() => setOfficeManagerOpen(false)} />}
     </main></div>
   </div>;
 }

@@ -3,6 +3,7 @@
 import { ChangeEvent, useEffect, useState } from "react";
 import { ArrowLeft, Eye, Save } from "lucide-react";
 import { extractDocument } from "../lib/document-extraction.mjs";
+import PurchaseProofApplication from "./purchase-proof-application";
 
 type Agency = "city_government" | "national_tax";
 type ApprovalStatus = "not_received" | "received" | "archived";
@@ -93,6 +94,7 @@ export default function ApprovalTracking({
     "idle" | "loading" | "saving" | "saved" | "error"
   >("idle");
   const [message, setMessage] = useState("");
+  const [purchaseRefresh, setPurchaseRefresh] = useState(0);
 
   useEffect(() => {
     setLocalFiles({});
@@ -223,6 +225,7 @@ export default function ApprovalTracking({
         throw new Error((await response.json()).error || "儲存失敗");
       setState("saved");
       setMessage("核准公文追蹤已儲存");
+      setPurchaseRefresh((current) => current + 1);
     } catch (error) {
       setState("error");
       setMessage(
@@ -406,6 +409,7 @@ export default function ApprovalTracking({
           客戶份已寄出
         </label>
       </fieldset>
+      <PurchaseProofApplication key={`${caseId}-${purchaseRefresh}`} caseId={caseId} />
       {message && (
         <p className={state === "error" ? "case-error" : "completion-note"}>
           {message}

@@ -7,6 +7,7 @@ import { basename, dirname, extname, join, normalize, resolve } from "node:path"
 import { fileURLToPath } from "node:url";
 import { DatabaseSync, backup } from "node:sqlite";
 import { OfficialQueryError, queryOfficialCases } from "./official-query.mjs";
+import { generatePurchaseProofDocx } from "./purchase-proof-docx.mjs";
 import { TaxQueryError, createTaxCaptcha, queryTaxCases, taxBureaus, taxQueryUrl } from "./tax-query.mjs";
 
 const rootDir = dirname(fileURLToPath(import.meta.url));
@@ -27,6 +28,7 @@ const taxOfficeValues = new Set(["未確認", "需要", "辦理中", "不需要"
 const taxBureauCodes = new Set(Object.keys(taxBureaus));
 const billingStatuses = new Set(["未請款", "已請款", "已收款"]);
 const approvalStatuses = new Set(["not_received", "received", "archived"]);
+const officeQualificationTypes = new Set(["bookkeeper", "accountant", "tax_agent"]);
 
 mkdirSync(dataDir, { recursive: true });
 mkdirSync(backupsDir, { recursive: true });
@@ -187,12 +189,59 @@ db.exec(`
     FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE CASCADE
   );
 
+  CREATE TABLE IF NOT EXISTS accounting_offices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    short_name TEXT NOT NULL DEFAULT '',
+    unified_number TEXT NOT NULL DEFAULT '',
+    responsible_person TEXT NOT NULL DEFAULT '',
+    responsible_person_id TEXT NOT NULL DEFAULT '',
+    address TEXT NOT NULL DEFAULT '',
+    phone TEXT NOT NULL DEFAULT '',
+    email TEXT NOT NULL DEFAULT '',
+    qualification_type TEXT NOT NULL DEFAULT 'bookkeeper',
+    media_code TEXT NOT NULL DEFAULT '',
+    license_number TEXT NOT NULL DEFAULT '',
+    is_default INTEGER NOT NULL DEFAULT 0,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS case_purchase_proof (
+    case_id INTEGER PRIMARY KEY,
+    office_id INTEGER,
+    page4_office_id INTEGER,
+    tax_registration_number TEXT NOT NULL DEFAULT '',
+    responsible_person_id TEXT NOT NULL DEFAULT '',
+    business_phone TEXT NOT NULL DEFAULT '',
+    email TEXT NOT NULL DEFAULT '',
+    tax_bureau_name TEXT NOT NULL DEFAULT '',
+    branch_name TEXT NOT NULL DEFAULT '',
+    sales_document_number TEXT NOT NULL DEFAULT '',
+    application_year TEXT NOT NULL DEFAULT '',
+    application_month TEXT NOT NULL DEFAULT '',
+    application_day TEXT NOT NULL DEFAULT '',
+    official_year TEXT NOT NULL DEFAULT '',
+    official_month TEXT NOT NULL DEFAULT '',
+    official_day TEXT NOT NULL DEFAULT '',
+    selected_pages_json TEXT NOT NULL DEFAULT '[1,2,3,4]',
+    checkboxes_json TEXT NOT NULL DEFAULT '{}',
+    generated_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE CASCADE,
+    FOREIGN KEY (office_id) REFERENCES accounting_offices(id) ON DELETE SET NULL,
+    FOREIGN KEY (page4_office_id) REFERENCES accounting_offices(id) ON DELETE SET NULL
+  );
+
   CREATE INDEX IF NOT EXISTS idx_cases_received_date ON cases(received_date);
   CREATE INDEX IF NOT EXISTS idx_cases_tax_id ON cases(tax_id);
   CREATE INDEX IF NOT EXISTS idx_cases_status ON cases(status);
   CREATE INDEX IF NOT EXISTS idx_case_events_case_id ON case_events(case_id, event_date DESC, id DESC);
   CREATE INDEX IF NOT EXISTS idx_billing_items_case_id ON billing_items(case_id, sort_order, id);
   CREATE INDEX IF NOT EXISTS idx_case_approval_documents_case_id ON case_approval_documents(case_id, status);
+  CREATE INDEX IF NOT EXISTS idx_accounting_offices_active_name ON accounting_offices(active, name);
+  CREATE INDEX IF NOT EXISTS idx_case_purchase_proof_office_id ON case_purchase_proof(office_id);
 
   INSERT INTO case_events (case_id, event_date, event_type, status, detail)
   SELECT c.id, c.received_date, '進度', c.status,
@@ -344,6 +393,66 @@ const upsertRegistrationCard = db.prepare(`
     original_received = excluded.original_received,
     customer_copy_sent = excluded.customer_copy_sent,
     updated_at = CURRENT_TIMESTAMP
+`);
+const accountingOfficeSelect = `
+  SELECT id, name, short_name AS shortName, unified_number AS unifiedNumber,
+    responsible_person AS responsiblePerson, responsible_person_id AS responsiblePersonId,
+    address, phone, email, qualification_type AS qualificationType,
+    media_code AS mediaCode, license_number AS licenseNumber,
+    is_default AS isDefault, active, created_at AS createdAt, updated_at AS updatedAt
+  FROM accounting_offices
+`;
+const listAccountingOffices = db.prepare(`${accountingOfficeSelect} ORDER BY is_default DESC, active DESC, name, id`);
+const getAccountingOffice = db.prepare(`${accountingOfficeSelect} WHERE id = ?`);
+const insertAccountingOffice = db.prepare(`
+  INSERT INTO accounting_offices (
+    name, short_name, unified_number, responsible_person, responsible_person_id,
+    address, phone, email, qualification_type, media_code, license_number,
+    is_default, active, updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+`);
+const updateAccountingOffice = db.prepare(`
+  UPDATE accounting_offices SET name = ?, short_name = ?, unified_number = ?,
+    responsible_person = ?, responsible_person_id = ?, address = ?, phone = ?,
+    email = ?, qualification_type = ?, media_code = ?, license_number = ?,
+    is_default = ?, active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+`);
+const getPurchaseProof = db.prepare(`
+  SELECT office_id AS officeId, page4_office_id AS page4OfficeId,
+    tax_registration_number AS taxRegistrationNumber,
+    responsible_person_id AS responsiblePersonId, business_phone AS businessPhone,
+    email, tax_bureau_name AS taxBureauName, branch_name AS branchName,
+    sales_document_number AS salesDocumentNumber,
+    application_year AS applicationYear, application_month AS applicationMonth,
+    application_day AS applicationDay, official_year AS officialYear,
+    official_month AS officialMonth, official_day AS officialDay,
+    selected_pages_json AS selectedPagesJson, checkboxes_json AS checkboxesJson,
+    generated_at AS generatedAt, updated_at AS updatedAt
+  FROM case_purchase_proof WHERE case_id = ?
+`);
+const upsertPurchaseProof = db.prepare(`
+  INSERT INTO case_purchase_proof (
+    case_id, office_id, page4_office_id, tax_registration_number,
+    responsible_person_id, business_phone, email, tax_bureau_name, branch_name,
+    sales_document_number, application_year, application_month, application_day,
+    official_year, official_month, official_day, selected_pages_json,
+    checkboxes_json, generated_at, updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  ON CONFLICT(case_id) DO UPDATE SET
+    office_id = excluded.office_id, page4_office_id = excluded.page4_office_id,
+    tax_registration_number = excluded.tax_registration_number,
+    responsible_person_id = excluded.responsible_person_id,
+    business_phone = excluded.business_phone, email = excluded.email,
+    tax_bureau_name = excluded.tax_bureau_name, branch_name = excluded.branch_name,
+    sales_document_number = excluded.sales_document_number,
+    application_year = excluded.application_year,
+    application_month = excluded.application_month,
+    application_day = excluded.application_day,
+    official_year = excluded.official_year, official_month = excluded.official_month,
+    official_day = excluded.official_day,
+    selected_pages_json = excluded.selected_pages_json,
+    checkboxes_json = excluded.checkboxes_json,
+    generated_at = excluded.generated_at, updated_at = CURRENT_TIMESTAMP
 `);
 const listCaseContentOptions = db.prepare(`
   SELECT entity_type AS entityType, case_content AS caseContent, MAX(updated_at) AS lastUsedAt
@@ -565,6 +674,15 @@ function parseStoredArray(value) {
   }
 }
 
+function parseStoredObject(value) {
+  try {
+    const parsed = JSON.parse(value || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 function preparationForCase(id, item = getCase.get(id)) {
   if (!item) return null;
   const stored = getPreparation.get(id);
@@ -587,6 +705,170 @@ function preparationForCase(id, item = getCase.get(id)) {
     shareholders: parseStoredArray(stored?.shareholdersJson),
     updatedAt: stored?.updatedAt || "",
   };
+}
+
+function accountingOfficePayload(input) {
+  const qualificationType = cleanText(input.qualificationType, 20) || "bookkeeper";
+  const unifiedNumber = cleanText(input.unifiedNumber, 8);
+  const responsiblePersonId = cleanText(input.responsiblePersonId, 10).toUpperCase();
+  if (!officeQualificationTypes.has(qualificationType)) throw new HttpError(400, "請選擇正確的專業資格");
+  if (unifiedNumber && !/^\d{8}$/.test(unifiedNumber)) throw new HttpError(400, "事務所統一編號需為 8 碼數字");
+  if (responsiblePersonId && !/^[A-Z][12]\d{8}$/.test(responsiblePersonId)) throw new HttpError(400, "事務所負責人身分證字號格式不正確");
+  const payload = {
+    name: cleanText(input.name, 200), shortName: cleanText(input.shortName, 100), unifiedNumber,
+    responsiblePerson: cleanText(input.responsiblePerson, 100), responsiblePersonId,
+    address: cleanText(input.address, 300), phone: cleanText(input.phone, 50),
+    email: cleanText(input.email, 200), qualificationType,
+    mediaCode: cleanText(input.mediaCode, 30), licenseNumber: cleanText(input.licenseNumber, 60),
+    isDefault: input.isDefault === true, active: input.active !== false,
+  };
+  if (!payload.name) throw new HttpError(400, "請填寫事務所名稱");
+  return payload;
+}
+
+function accountingOfficeForClient(row) {
+  return row ? { ...row, isDefault: Boolean(row.isDefault), active: Boolean(row.active) } : null;
+}
+
+function requireAccountingOffice(id, label = "事務所") {
+  const office = getAccountingOffice.get(id);
+  if (!office) throw new HttpError(400, `找不到所選${label}`);
+  return accountingOfficeForClient(office);
+}
+
+function validateOfficeForPurchaseProof(office, label) {
+  const missing = [
+    ["unifiedNumber", "統一編號"], ["responsiblePerson", "負責人"],
+    ["responsiblePersonId", "負責人身分證字號"], ["address", "地址"],
+    ["phone", "電話"], ["mediaCode", "媒體代號"], ["licenseNumber", "證書字號"],
+  ].filter(([key]) => !cleanText(office[key], 500)).map(([, name]) => name);
+  if (missing.length) throw new HttpError(400, `${label}尚缺：${missing.join("、")}`);
+}
+
+const defaultPurchaseProofCheckboxes = Object.freeze({
+  page1: {
+    registration: { establishment: true, change: false, other: false },
+    reason: { new: true, change: false, lost: false, damaged: false, other: false },
+    attachments: { responsibleIdOriginal: false, agentPickup: true },
+    relation: { responsible: false, agent: false, employee: false, otherOffice: true },
+    invoiceTypes: { twoCopy: true, threeCopy: true, twoCopyRegister: false, threeCopyRegister: false, special: false },
+  },
+  page2: {
+    services: { purchase: true, receiveCertificate: true },
+    qualification: { accountant: false, bookkeeper: true, taxAgent: false },
+    actions: { purchase: true, receiveCertificate: true },
+  },
+});
+
+function rocDateParts(isoDate = "") {
+  const match = String(isoDate).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return match ? { year: String(Number(match[1]) - 1911), month: String(Number(match[2])), day: String(Number(match[3])) }
+    : { year: "", month: "", day: "" };
+}
+
+function defaultPurchaseDate() {
+  const [year, month] = taipeiDate().split("-").map(Number);
+  return { year: String(year - 1911), month: String(month), day: "" };
+}
+
+function rocPart(value, label, { min, max, required = false }) {
+  const text = cleanText(value, 3);
+  if (!text && !required) return "";
+  if (!/^\d{1,3}$/.test(text) || Number(text) < min || Number(text) > max) {
+    throw new HttpError(400, `${label}格式不正確`);
+  }
+  return String(Number(text));
+}
+
+function purchaseProofPayload(input, current, stored = null) {
+  const defaults = defaultPurchaseDate();
+  const officeId = Number(input.officeId ?? stored?.officeId ?? 0);
+  const page4OfficeId = Number(input.page4OfficeId ?? stored?.page4OfficeId ?? officeId);
+  const selectedPages = [...new Set((Array.isArray(input.selectedPages) ? input.selectedPages : [1, 2, 3, 4]).map(Number))]
+    .filter((page) => Number.isInteger(page) && page >= 1 && page <= 4).sort((a, b) => a - b);
+  if (!selectedPages.length) throw new HttpError(400, "請至少選擇一頁購票證明申請書");
+  const checkboxes = input.checkboxes && typeof input.checkboxes === "object" && !Array.isArray(input.checkboxes)
+    ? input.checkboxes : defaultPurchaseProofCheckboxes;
+  const payload = {
+    officeId, page4OfficeId,
+    taxRegistrationNumber: cleanText(input.taxRegistrationNumber ?? stored?.taxRegistrationNumber, 20),
+    responsiblePersonId: cleanText(input.responsiblePersonId ?? stored?.responsiblePersonId, 10).toUpperCase(),
+    businessPhone: cleanText(input.businessPhone ?? stored?.businessPhone, 50),
+    email: cleanText(input.email ?? stored?.email, 200),
+    taxBureauName: cleanText(input.taxBureauName ?? stored?.taxBureauName ?? taxBureaus[current.taxBureauCode]?.shortName, 20).replace(/^臺北$/, "台北"),
+    branchName: cleanText(input.branchName ?? stored?.branchName, 100),
+    salesDocumentNumber: cleanText(input.salesDocumentNumber ?? stored?.salesDocumentNumber, 100),
+    applicationDate: {
+      year: rocPart(input.applicationDate?.year ?? stored?.applicationYear ?? defaults.year, "申請年份", { min: 1, max: 999, required: true }),
+      month: rocPart(input.applicationDate?.month ?? stored?.applicationMonth ?? defaults.month, "申請月份", { min: 1, max: 12 }),
+      day: rocPart(input.applicationDate?.day ?? stored?.applicationDay, "申請日期", { min: 1, max: 31 }),
+    },
+    officialDate: {
+      year: rocPart(input.officialDate?.year ?? stored?.officialYear, "公文年份", { min: 1, max: 999 }),
+      month: rocPart(input.officialDate?.month ?? stored?.officialMonth, "公文月份", { min: 1, max: 12 }),
+      day: rocPart(input.officialDate?.day ?? stored?.officialDay, "公文日期", { min: 1, max: 31 }),
+    },
+    selectedPages, checkboxes,
+  };
+  if (!Number.isInteger(officeId) || officeId < 1) throw new HttpError(400, "請選擇受任事務所");
+  if (!Number.isInteger(page4OfficeId) || page4OfficeId < 1) throw new HttpError(400, "請選擇第 4 頁的專業代理人事務所");
+  if (payload.responsiblePersonId && !/^[A-Z][12]\d{8}$/.test(payload.responsiblePersonId)) throw new HttpError(400, "負責人身分證字號格式不正確");
+  if (!payload.taxBureauName) throw new HttpError(400, "請選擇國稅局");
+  if (!payload.branchName) throw new HttpError(400, "請填寫分局／稽徵所名稱");
+  return payload;
+}
+
+function purchaseProofForCase(id, item = getCase.get(id)) {
+  if (!item) return null;
+  const stored = getPurchaseProof.get(id);
+  const preparation = preparationForCase(id, item);
+  const nationalTax = getApprovalDocuments.all(id).find((row) => row.agency === "national_tax");
+  const official = rocDateParts(nationalTax?.approvalDate || "");
+  const application = defaultPurchaseDate();
+  const defaultOffice = listAccountingOffices.all().find((office) => Boolean(office.active) && Boolean(office.isDefault));
+  return {
+    case: {
+      id: item.id, caseNumber: item.caseNumber, companyName: item.companyName,
+      taxId: item.taxId, representative: preparation?.representative || item.representative || "",
+      address: preparation?.registrationAddress || item.address || "",
+    },
+    settings: {
+      officeId: stored?.officeId || defaultOffice?.id || null,
+      page4OfficeId: stored?.page4OfficeId || stored?.officeId || defaultOffice?.id || null,
+      taxRegistrationNumber: stored?.taxRegistrationNumber || "",
+      responsiblePersonId: stored?.responsiblePersonId || preparation?.nationalId || "",
+      businessPhone: stored?.businessPhone || preparation?.contactPhone || "",
+      email: stored?.email || "",
+      taxBureauName: stored?.taxBureauName || taxBureaus[item.taxBureauCode]?.shortName?.replace(/^臺北$/, "台北") || "",
+      branchName: stored?.branchName || "",
+      salesDocumentNumber: stored?.salesDocumentNumber || "",
+      applicationDate: {
+        year: stored?.applicationYear || application.year,
+        month: stored?.applicationMonth || application.month,
+        day: stored?.applicationDay || application.day,
+      },
+      officialDate: {
+        year: stored?.officialYear || official.year,
+        month: stored?.officialMonth || official.month,
+        day: stored?.officialDay || official.day,
+      },
+      selectedPages: stored ? parseStoredArray(stored.selectedPagesJson) : [1, 2, 3, 4],
+      checkboxes: stored ? parseStoredObject(stored.checkboxesJson) : defaultPurchaseProofCheckboxes,
+      generatedAt: stored?.generatedAt || "", updatedAt: stored?.updatedAt || "",
+    },
+    nationalTaxApprovalReceived: ["received", "archived"].includes(nationalTax?.status),
+  };
+}
+
+function savePurchaseProof(id, payload, generatedAt = "") {
+  upsertPurchaseProof.run(
+    id, payload.officeId, payload.page4OfficeId, payload.taxRegistrationNumber,
+    payload.responsiblePersonId, payload.businessPhone, payload.email,
+    payload.taxBureauName, payload.branchName, payload.salesDocumentNumber,
+    payload.applicationDate.year, payload.applicationDate.month, payload.applicationDate.day,
+    payload.officialDate.year, payload.officialDate.month, payload.officialDate.day,
+    JSON.stringify(payload.selectedPages), JSON.stringify(payload.checkboxes), generatedAt,
+  );
 }
 
 function approvalTracking(id) {
@@ -838,6 +1120,45 @@ async function handleApi(request, response, url) {
     sendJson(response, 200, { ok: true, port, database: basename(databasePath), date: taipeiDate() });
     return true;
   }
+  if (request.method === "GET" && url.pathname === "/api/accounting-offices") {
+    sendJson(response, 200, { ok: true, offices: listAccountingOffices.all().map(accountingOfficeForClient) });
+    return true;
+  }
+  if (request.method === "POST" && url.pathname === "/api/accounting-offices") {
+    const payload = accountingOfficePayload(await readJson(request));
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      if (payload.isDefault) db.prepare("UPDATE accounting_offices SET is_default = 0").run();
+      const result = insertAccountingOffice.run(
+        payload.name, payload.shortName, payload.unifiedNumber, payload.responsiblePerson,
+        payload.responsiblePersonId, payload.address, payload.phone, payload.email,
+        payload.qualificationType, payload.mediaCode, payload.licenseNumber,
+        payload.isDefault ? 1 : 0, payload.active ? 1 : 0,
+      );
+      db.exec("COMMIT");
+      sendJson(response, 201, { ok: true, office: accountingOfficeForClient(getAccountingOffice.get(Number(result.lastInsertRowid))) });
+    } catch (error) { db.exec("ROLLBACK"); throw error; }
+    return true;
+  }
+  const accountingOfficeMatch = url.pathname.match(/^\/api\/accounting-offices\/(\d+)$/);
+  if (request.method === "PUT" && accountingOfficeMatch) {
+    const id = Number(accountingOfficeMatch[1]);
+    if (!getAccountingOffice.get(id)) throw new HttpError(404, "找不到這間事務所");
+    const payload = accountingOfficePayload(await readJson(request));
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      if (payload.isDefault) db.prepare("UPDATE accounting_offices SET is_default = 0 WHERE id <> ?").run(id);
+      updateAccountingOffice.run(
+        payload.name, payload.shortName, payload.unifiedNumber, payload.responsiblePerson,
+        payload.responsiblePersonId, payload.address, payload.phone, payload.email,
+        payload.qualificationType, payload.mediaCode, payload.licenseNumber,
+        payload.isDefault ? 1 : 0, payload.active ? 1 : 0, id,
+      );
+      db.exec("COMMIT");
+      sendJson(response, 200, { ok: true, office: accountingOfficeForClient(getAccountingOffice.get(id)) });
+    } catch (error) { db.exec("ROLLBACK"); throw error; }
+    return true;
+  }
   if (request.method === "GET" && url.pathname === "/api/cases") {
     const year = url.searchParams.get("year") || taipeiDate().slice(0, 4);
     if (!/^\d{4}$/.test(year)) throw new HttpError(400, "年度格式不正確");
@@ -992,6 +1313,92 @@ async function handleApi(request, response, url) {
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }
     sendJson(response, 200, { ok: true, ...approvalTracking(id) });
+    return true;
+  }
+
+  const purchaseProofMatch = url.pathname.match(/^\/api\/cases\/(\d+)\/purchase-proof$/);
+  if (request.method === "GET" && purchaseProofMatch) {
+    const id = Number(purchaseProofMatch[1]);
+    const current = getCase.get(id);
+    if (!current) throw new HttpError(404, "找不到這筆案件");
+    sendJson(response, 200, {
+      ok: true,
+      ...purchaseProofForCase(id, current),
+      offices: listAccountingOffices.all().map(accountingOfficeForClient),
+    });
+    return true;
+  }
+  if (request.method === "PUT" && purchaseProofMatch) {
+    const id = Number(purchaseProofMatch[1]);
+    const current = getCase.get(id);
+    if (!current) throw new HttpError(404, "找不到這筆案件");
+    const stored = getPurchaseProof.get(id);
+    const payload = purchaseProofPayload(await readJson(request), current, stored);
+    requireAccountingOffice(payload.officeId, "受任事務所");
+    requireAccountingOffice(payload.page4OfficeId, "第 4 頁事務所");
+    savePurchaseProof(id, payload, stored?.generatedAt || "");
+    sendJson(response, 200, { ok: true, ...purchaseProofForCase(id, current) });
+    return true;
+  }
+
+  const purchaseProofDocxMatch = url.pathname.match(/^\/api\/cases\/(\d+)\/purchase-proof\/docx$/);
+  if (request.method === "POST" && purchaseProofDocxMatch) {
+    const id = Number(purchaseProofDocxMatch[1]);
+    const current = getCase.get(id);
+    if (!current) throw new HttpError(404, "找不到這筆案件");
+    const tracking = purchaseProofForCase(id, current);
+    if (!tracking.nationalTaxApprovalReceived) {
+      throw new HttpError(409, "請先將國稅局核准公文標記為已收到或已歸檔");
+    }
+    if (!/^\d{8}$/.test(current.taxId || "")) throw new HttpError(400, "案件尚未填寫 8 碼統一編號");
+    const stored = getPurchaseProof.get(id);
+    const payload = purchaseProofPayload(await readJson(request), current, stored);
+    const office = requireAccountingOffice(payload.officeId, "受任事務所");
+    const page4Office = requireAccountingOffice(payload.page4OfficeId, "第 4 頁事務所");
+    validateOfficeForPurchaseProof(office, "受任事務所");
+    validateOfficeForPurchaseProof(page4Office, "第 4 頁事務所");
+    if (!current.companyName || !current.representative || !current.address) {
+      throw new HttpError(400, "案件尚缺公司名稱、負責人或營業地址，請先補齊案件／資料準備內容");
+    }
+    if (!payload.taxRegistrationNumber) throw new HttpError(400, "請填寫稅籍編號");
+    if (!payload.responsiblePersonId) throw new HttpError(400, "請填寫公司負責人身分證字號");
+    const checkboxes = JSON.parse(JSON.stringify(payload.checkboxes || {}));
+    checkboxes.page2 ||= {};
+    checkboxes.page2.qualification = {
+      accountant: office.qualificationType === "accountant",
+      bookkeeper: office.qualificationType === "bookkeeper",
+      taxAgent: office.qualificationType === "tax_agent",
+    };
+    const generatedAt = new Date().toISOString();
+    const buffer = await generatePurchaseProofDocx({
+      request: { ...payload, checkboxes },
+      customer: {
+        unifiedNumber: current.taxId,
+        taxRegistrationNumber: payload.taxRegistrationNumber,
+        companyName: current.companyName,
+        responsiblePerson: current.representative,
+        responsiblePersonId: payload.responsiblePersonId,
+        address: current.address,
+        phone: payload.businessPhone,
+        email: payload.email,
+      },
+      office,
+      page4Office,
+    });
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      savePurchaseProof(id, { ...payload, checkboxes }, generatedAt);
+      insertEvent.run(id, taipeiDate(), "購票證明", current.status, `已產生購票證明申請 Word（${payload.selectedPages.length} 頁）`);
+      db.exec("COMMIT");
+    } catch (error) { db.exec("ROLLBACK"); throw error; }
+    const safeCaseNumber = current.caseNumber.replace(/[^0-9A-Za-z_-]/g, "_");
+    const fileName = `購票證明申請-${current.companyName}.docx`;
+    response.writeHead(200, securityHeaders({
+      "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "Content-Disposition": `attachment; filename="purchase-proof-${safeCaseNumber}.docx"; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+      "Content-Length": String(buffer.length),
+    }));
+    response.end(buffer);
     return true;
   }
 
