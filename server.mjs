@@ -326,6 +326,13 @@ const getEvents = db.prepare(`
   SELECT id, event_date AS eventDate, event_type AS eventType, status, detail, created_at AS createdAt
   FROM case_events WHERE case_id = ? ORDER BY event_date DESC, id DESC
 `);
+const findMatchingTaxEvent = db.prepare(`
+  SELECT id FROM case_events
+  WHERE case_id = ? AND event_type = '國稅局查詢' AND status = ? AND detail = ?
+  LIMIT 1
+`);
+const deleteCaseEvent = db.prepare("DELETE FROM case_events WHERE id = ? AND case_id = ?");
+const deleteCase = db.prepare("DELETE FROM cases WHERE id = ?");
 const getBillingItems = db.prepare(`
   SELECT id, item_name AS itemName, amount, notes, sort_order AS sortOrder
   FROM billing_items WHERE case_id = ? ORDER BY sort_order, id
@@ -1106,6 +1113,7 @@ function applyTaxProgress(current, official) {
   const checkedAt = new Date().toISOString();
   const label = completed ? "國稅局已完成" : "國稅局辦理中";
   const detail = `${taxBureaus[bureauCode].shortName}・${official.receiptNo || "無文號"}・${official.caseType || "稅籍登記"}・${officialStatus || "已查詢"}`;
+  const duplicateEvent = findMatchingTaxEvent.get(current.id, label, detail);
 
   db.exec("BEGIN IMMEDIATE");
   try {
@@ -1115,10 +1123,18 @@ function applyTaxProgress(current, official) {
         updated_at = CURRENT_TIMESTAMP WHERE id = ?
     `).run(taxOfficeRequired, bureauCode, cleanText(official.receiptNo, 100),
       cleanText(official.receivedDate, 30), cleanText(official.caseType, 200), officialStatus, checkedAt, current.id);
-    insertEvent.run(current.id, rocDateToIso(official.receivedDate) || taipeiDate(), "國稅局查詢", label, detail);
+    if (!duplicateEvent) {
+      insertEvent.run(current.id, rocDateToIso(official.receivedDate) || taipeiDate(), "國稅局查詢", label, detail);
+    }
     db.exec("COMMIT");
   } catch (error) { db.exec("ROLLBACK"); throw error; }
-  return { case: getCase.get(current.id), events: getEvents.all(current.id), official: { ...official, checkedAt } };
+  return {
+    changed: !duplicateEvent,
+    duplicatePrevented: Boolean(duplicateEvent),
+    case: getCase.get(current.id),
+    events: getEvents.all(current.id),
+    official: { ...official, checkedAt },
+  };
 }
 
 async function handleApi(request, response, url) {
@@ -1321,6 +1337,21 @@ async function handleApi(request, response, url) {
     sendJson(response, 200, { ok: true, ...approvalTracking(id) });
     return true;
   }
+  if (request.method === "DELETE" && caseMatch) {
+    const id = Number(caseMatch[1]);
+    const current = getCase.get(id);
+    if (!current) throw new HttpError(404, "找不到這筆案件");
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      deleteCase.run(id);
+      db.exec("COMMIT");
+    } catch (error) { db.exec("ROLLBACK"); throw error; }
+    for (const sessions of [officialQuerySessions, taxQuerySessions]) {
+      for (const [sessionId, session] of sessions) if (session?.caseId === id) sessions.delete(sessionId);
+    }
+    sendJson(response, 200, { ok: true, deletedCase: { id, caseNumber: current.caseNumber, companyName: current.companyName } });
+    return true;
+  }
 
   const purchaseProofMatch = url.pathname.match(/^\/api\/cases\/(\d+)\/purchase-proof$/);
   if (request.method === "GET" && purchaseProofMatch) {
@@ -1405,6 +1436,18 @@ async function handleApi(request, response, url) {
       "Content-Length": String(buffer.length),
     }));
     response.end(buffer);
+    return true;
+  }
+
+  const eventDeleteMatch = url.pathname.match(/^\/api\/cases\/(\d+)\/events\/(\d+)$/);
+  if (request.method === "DELETE" && eventDeleteMatch) {
+    const caseId = Number(eventDeleteMatch[1]);
+    const eventId = Number(eventDeleteMatch[2]);
+    if (!getCase.get(caseId)) throw new HttpError(404, "找不到這筆案件");
+    const result = deleteCaseEvent.run(eventId, caseId);
+    if (!result.changes) throw new HttpError(404, "找不到這筆案件歷程");
+    db.prepare("UPDATE cases SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(caseId);
+    sendJson(response, 200, { ok: true, deletedEventId: eventId, events: getEvents.all(caseId) });
     return true;
   }
 

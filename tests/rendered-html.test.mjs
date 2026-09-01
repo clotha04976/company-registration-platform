@@ -341,6 +341,20 @@ test("ERP dashboard exposes full progress, official queries, reminders, and bill
   assert.match(server, /billingMatch/);
 });
 
+test("ERP prevents duplicate tax history and exposes confirmed case and event deletion", async () => {
+  const [dashboard, server] = await Promise.all([
+    readFile(new URL("../app/cases-dashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../server.mjs", import.meta.url), "utf8"),
+  ]);
+  assert.match(server, /findMatchingTaxEvent/);
+  assert.match(server, /duplicatePrevented/);
+  assert.match(server, /request\.method === "DELETE" && caseMatch/);
+  assert.match(server, /eventDeleteMatch/);
+  assert.match(dashboard, /刪除這筆歷程/);
+  assert.match(dashboard, /案件歷程、資料準備、請款與購票證設定會一併刪除/);
+  assert.match(dashboard, /未重複新增案件歷程/);
+});
+
 test("sensitive data remains fully visible in confirmation and documents", async () => {
   const page = await readFile(
     new URL("../app/page.tsx", import.meta.url),
