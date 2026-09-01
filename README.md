@@ -1,104 +1,66 @@
-# 公司設立登記智慧精靈
+# 工商案件管理台帳
 
-本機執行的公司設立登記案件管理工具。前端是 Vite + React SPA，後端是兩個本機
-FastAPI 服務：案件 API 與身分證 OCR sidecar。資料存放在本機 SQLite。
+以案件進度為核心的本機工商登記工作台。React 負責台帳、完整進度、OCR 資料確認與文件產出；Node.js 負責案件 API、官方進度查詢、提醒、請款與 SQLite；Python 僅保留常駐的 PaddleOCR 身分證辨識服務。
 
-## 架構
+## 技術棧
 
-| 元件 | 位置 | 連接埠 |
+| 層級 | 技術 | 用途 |
 | --- | --- | --- |
-| 前端 SPA | `app/`、`lib/` | 5173（`npm run preview` 為 4173） |
-| 案件 API | `api-service/` | 8690 |
-| 身分證 OCR | `ocr-service/` | 8689 |
-| SQLite 資料庫 | `api-service/data/cases.db` | — |
+| 前端 | React 19、TypeScript、Vite 8 | 案件台帳、資料準備、文件產生、核准追蹤 |
+| 案件後端 | Node.js 22.17+ 內建 HTTP、`node:sqlite` | REST API、完整進度、提醒、收款、備份 |
+| RPA 查詢 | Node.js `fetch` + HTML 解析 | 市政府與國稅局官方進度；國稅局驗證碼由人員輸入 |
+| OCR | FastAPI、PaddleOCR | 本機身分證辨識 sidecar，模型常駐記憶體 |
+| 資料庫 | SQLite | 本機案件、歷程、資料準備與核准追蹤 |
+| 文件處理 | pdf.js、Tesseract.js、pdf-lib、OOXML、fflate | PDF 擷取、一般文件 OCR、DOCX 與 ZIP 產出 |
 
-前端以相對路徑呼叫 `/api/...`，由 Vite 的 proxy 轉發到案件 API，因此開發與正式
-環境的程式碼不需要區分位址。
-
-## 需求
-
-- Node.js `>=22.13.0`
-- Python 3.10 或 3.11
+Cloudflare D1 與 Drizzle 已不在此架構中。案件 API 也不再由 FastAPI 提供；FastAPI 只服務需要 Python/Paddle 生態的 OCR。
 
 ## 快速開始
 
-雙擊 `start-website.bat`，開啟 http://localhost:5173 。
-首次執行會建立 Python 虛擬環境並下載 PP-OCRv6 模型，時間較久。
+需求：Node.js 22.17 以上，以及 OCR 所需的 Python 3.10 或 3.11。
 
-三個服務都跑在**同一個視窗**裡：`npm run dev` 啟動 Vite，Vite 再把案件 API 與身分證
-OCR 當成子程序帶起來（`build/python-services-plugin.ts`），日誌以 `[case-api]`、
-`[identity-ocr]` 前綴區分。關掉視窗時子程序會一併結束——它們會輪詢父程序是否還在，
-所以連強制關閉也不會留下佔用埠的殘留程序。
-
-已經在監聽的埠會被沿用而不是重複啟動，因此下列指令仍可單獨執行（例如只想重啟某個
-服務，或想讓它獨立開一個視窗看日誌）：
+雙擊 `start-website.bat`，或執行：
 
 ```powershell
-api-service\run-api-service.bat
-ocr-service\run-ocr-service.bat
+npm install
+npm run dev
 ```
 
-`VITE_IDENTITY_OCR_URL` 一旦指向本機以外的位址（例如辨識工作站），Vite 就不會再啟動
-本機 OCR 服務。
+開發網址是 http://localhost:5173 。Vite 會啟動 Node ERP 服務（5566）並把 `/api` 代理過去，也會在需要時啟動 OCR（8689）。若 5566 已由正確服務監聽，會沿用該服務。
+
+正式本機模式：
+
+```powershell
+npm run build
+npm start
+```
+
+開啟 http://localhost:5566 。
 
 ## 常用指令
 
-- `npm run dev`：啟動前端開發伺服器（含 `/api` proxy）
-- `npm run build`：型別檢查並建置到 `dist/`
-- `npm run preview`：預覽建置結果
-- `npm test`：建置後執行 `tests/*.test.mjs`
-- `npm run lint`：ESLint 檢查
-- `api-service\.venv\Scripts\python -m unittest discover -s tests`：案件 API 測試
+- `npm run dev`：啟動 React、Node ERP 與本機 OCR 開發環境
+- `npm run build`：TypeScript 型別檢查並建置 `dist/`
+- `npm test`：建置並執行 Node 測試
+- `npm run lint`：執行 ESLint
+- `npm run backup`：建立 SQLite 備份
+- `ocr-service\run-ocr-service.bat`：單獨啟動 OCR
 - `ocr-service\.venv\Scripts\python -m unittest discover -s tests`：OCR 測試
 
-## 資料庫
+## 資料與隱私
 
-案件 API 啟動時會自動建立資料表與 10 筆承辦人種子資料，不需要額外的 migration
-步驟。資料庫預設位於 `api-service/data/cases.db`，可用 `CASES_DATABASE_PATH`
-指定其他路徑。該目錄已被 Git 忽略。
+資料庫預設位於 `data/cases.sqlite`，備份位於 `backups/`；兩者都已被 Git 忽略。可用 `APP_DATA_DIR` 與 `APP_BACKUP_DIR` 改位置。
 
-資料表：`employees`、`cases`、`case_approval_documents`、`registration_card_tracking`。
-核准公文與登記事項卡的紀錄會隨案件一併刪除（`ON DELETE CASCADE`，連線時啟用
-`PRAGMA foreign_keys`）。
+資料準備功能會把 OCR 後經人工確認的文字欄位存到案件中，並同步公司名稱、負責人、預查編號、地址與資本額。身分證原始圖片只在瀏覽器與本機 OCR 記憶體中處理，不寫入 SQLite、不放進 Git。OCR 服務只監聽 `127.0.0.1:8689`；未加驗證與 TLS 前不要公開到網際網路。
 
-## 股東與所營事業
+## 為什麼 OCR 仍用小型 API
 
-步驟 1 的「股東身分證明文件」可逐位新增股東，人數不限；每位股東各自上傳正面／反面／
-合併掃描，辨識結果會填入該位股東的姓名、身分證字號、出生日期與戶籍地址，手動修改過
-的欄位不會被後續辨識覆蓋。負責人自動列為第一位股東。
+如果每張圖都執行一次 Python 腳本，PaddleOCR 模型會反覆載入，等待時間與記憶體抖動都比較大。現在的 FastAPI sidecar 沒有承擔 ERP 邏輯，只讓模型常駐並接收單張圖片；這比把整套案件後端改成 Python 簡單，也比每次執行腳本穩定。
 
-股東名單會同時用於**股東同意書**與**設立登記表**的「董事、股東名單」與「資本明細」。
-股東同意書依經濟部範本（t70130）產生：申請事項／同意內容表格、公司印章欄，以及每位
-股東一列的簽名欄。簽名欄留白，因為必須由本人親簽。
+## 功能分層
 
-同意書的內容取自 `lib/shareholder-consent.mjs` 的申請事項目錄。設立只用「公司設立」
-一項，變更登記所需的改選董事、遷址、增資等條文已一併建好，日後接變更登記時是多選幾
-個項目，而不是另寫一份產生器。
+1. 案件台帳是主入口：基本資料、完整進度、官方查詢、提醒、請款與收款。
+2. 每筆案件可進入「資料準備與 OCR」，辨識後人工確認並儲存欄位。
+3. 確認資料可產出 DOCX/ZIP，完成後進入市府、國稅局公文與登記事項卡追蹤。
 
-所營事業項目以經濟部「公司行號營業項目代碼表」為選單來源（788 項），可輸入代碼或中
-文名稱搜尋。刪除需二次確認；新增後會提醒該項目與名稱預查核定書不一致，送件前要辦
-「預查馬上辦」。代碼表由 `node build/build-business-items.mjs` 從
-`BusinessScopeCategories.json` 產生為 `lib/business-items.mjs`。
-
-## 本機身分證 OCR
-
-OCR 服務只監聽 `127.0.0.1:8689`，在記憶體中處理上傳檔案，不保留身分證影像。
-步驟 1 提供正面、反面與正反面合併 A4 三種上傳欄位。正面辨識取得姓名、通過檢查碼
-驗證的身分證字號與民國出生日期；反面辨識取得地址，並以條碼作為證號的備援來源。
-辨識狀態依上傳的那一面判斷：反面沒有姓名與生日，不會被列為未辨識欄位。正反面可以
-同時上傳，兩張各自辨識，先上傳的那張不會因為後上傳而被取消。
-
-每個上傳欄位下方會顯示縮圖（PDF 取第一頁），用來確認傳的是不是正確的檔案。
-服務無法連線時，網站會顯示明確的連線錯誤，而不會退回不可靠的瀏覽器 OCR。
-
-服務預設以 **CPU** 執行，約 6 秒辨識一張，不需要與 CUDA 版本相符的 paddle。每次
-請求只處理一張證件，這個延遲對本機備援的定位是可接受的。要改用 GPU 需安裝
-`requirements-gpu.txt`（或以 `OCR_GPU=1` 執行 `setup-venv.bat`）**並且**設定
-`OCR_DEVICE=gpu:0`——只裝 GPU 版不會自動切換裝置。
-
-若要改指向其他位址，設定 `VITE_IDENTITY_OCR_URL`（Vite 只會暴露 `VITE_` 開頭的
-環境變數），並把網站來源加入 `OCR_ALLOWED_ORIGINS`。未加上驗證與傳輸加密前，
-請勿將 OCR 服務公開對外。
-
-案件 API 的跨來源設定為 `CASES_ALLOWED_ORIGINS`。透過 Vite proxy 使用時不會觸發
-跨來源請求，該設定僅在前端直接呼叫 8690 埠時才需要。
+一般 PDF 擷取與文件分類在瀏覽器執行；身分證辨識走本機 OCR。國稅局查詢遇到驗證碼時，系統顯示官方驗證碼讓承辦人輸入，不嘗試以 AI 繞過。

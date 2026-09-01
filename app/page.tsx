@@ -203,6 +203,11 @@ const initialForm = {
   capital: "1,000,000",
   representativeCapital: "",
 };
+type PreparationData = typeof initialForm & {
+  business: string[];
+  shareholders: Array<Omit<ShareholderDraft, "files">>;
+  updatedAt?: string;
+};
 const initialBusiness = [
   "E599010 配管工程業",
   "E601010 電器承裝業",
@@ -464,6 +469,10 @@ export default function Home() {
     Record<string, IdentityRecognition>
   >({});
   const [businessAdded, setBusinessAdded] = useState(false);
+  const [preparationSave, setPreparationSave] = useState<{
+    state: "idle" | "loading" | "saving" | "saved" | "error";
+    message: string;
+  }>({ state: "idle", message: "" });
   // Keyed by "representative" or a shareholder key. Dropping two scans on one
   // side zone used to keep the first and discard the rest without saying so,
   // which reads exactly like "only one file was recognised".
@@ -511,6 +520,7 @@ export default function Home() {
     business: false,
   });
   const stageUpdatedCases = useRef(new Set<number>());
+  const preparationRun = useRef(0);
   const refs = useRef<Record<SlotKey, HTMLInputElement | null>>(
     {} as Record<SlotKey, HTMLInputElement | null>,
   );
@@ -1568,10 +1578,11 @@ export default function Home() {
     );
   };
 
-  const openWizard = (item: { id: number; companyName: string }) => {
+  const openWizard = async (item: { id: number; companyName: string }) => {
+    const run = ++preparationRun.current;
     stageUpdatedCases.current.delete(item.id);
     setActiveCaseId(item.id);
-    setForm({
+    const blankForm = {
       company: item.companyName,
       representative: "",
       nationalId: "",
@@ -1586,7 +1597,8 @@ export default function Home() {
       contactPostalCode: "",
       capital: "",
       representativeCapital: "",
-    });
+    };
+    setForm(blankForm);
     setBusiness([]);
     setBusinessAdded(false);
     setUploadNotices({});
@@ -1635,6 +1647,72 @@ export default function Home() {
     addressManual.current = false;
     setStep(1);
     setView("wizard");
+    setPreparationSave({ state: "loading", message: "載入已儲存的資料準備內容…" });
+    try {
+      const response = await fetch(`/api/cases/${item.id}/preparation`);
+      const payload = (await response.json().catch(() => ({}))) as {
+        preparation?: PreparationData;
+        message?: string;
+      };
+      if (!response.ok || !payload.preparation)
+        throw new Error(payload.message || "資料準備內容載入失敗");
+      if (run !== preparationRun.current) return;
+      const saved = payload.preparation;
+      setForm({ ...blankForm, ...saved });
+      setBusiness(Array.isArray(saved.business) ? saved.business : []);
+      setBusinessAdded(Boolean(saved.business?.length));
+      commitShareholders(
+        Array.isArray(saved.shareholders)
+          ? saved.shareholders.map((entry) => ({ ...entry, files: [] }))
+          : [],
+      );
+      setPreparationSave({
+        state: "saved",
+        message: saved.updatedAt ? "已載入上次儲存的內容。" : "尚無儲存內容，可從 OCR 開始準備。",
+      });
+    } catch (error) {
+      if (run !== preparationRun.current) return;
+      setPreparationSave({
+        state: "error",
+        message: error instanceof Error ? error.message : "資料準備內容載入失敗",
+      });
+    }
+  };
+
+  const savePreparation = async () => {
+    if (!activeCaseId) {
+      setPreparationSave({ state: "error", message: "找不到目前案件，請返回台帳後重試。" });
+      return false;
+    }
+    setPreparationSave({ state: "saving", message: "正在儲存確認後的欄位…" });
+    try {
+      const response = await fetch(`/api/cases/${activeCaseId}/preparation`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...form,
+          business,
+          shareholders: shareholders.map((entry) => ({
+            key: entry.key,
+            name: entry.name,
+            nationalId: entry.nationalId,
+            birthDate: entry.birthDate,
+            address: entry.address,
+            capital: entry.capital,
+          })),
+        }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as { message?: string };
+      if (!response.ok) throw new Error(payload.message || "資料準備內容儲存失敗");
+      setPreparationSave({ state: "saved", message: "已儲存至這筆案件；原始身分證圖片不會寫入資料庫。" });
+      return true;
+    } catch (error) {
+      setPreparationSave({
+        state: "error",
+        message: error instanceof Error ? error.message : "資料準備內容儲存失敗",
+      });
+      return false;
+    }
   };
 
   if (view === "dashboard") return <CasesDashboard onOpenWizard={openWizard} />;
@@ -2502,12 +2580,24 @@ export default function Home() {
               </button>
             </div>
             <div className="stage-actions-right">
-              <button className="primary" onClick={() => setStep(3)}>
-                下一步：下載文件
+              <button
+                className="primary"
+                disabled={preparationSave.state === "saving"}
+                onClick={() => void savePreparation().then((saved) => saved && setStep(3))}
+              >
+                {preparationSave.state === "saving" ? "儲存中…" : "儲存並下載文件"}
                 <ArrowRight size={16} />
               </button>
             </div>
           </footer>
+          {preparationSave.message && (
+            <p
+              className={preparationSave.state === "error" ? "business-warning" : "capital-total"}
+              aria-live="polite"
+            >
+              {preparationSave.message}
+            </p>
+          )}
         </section>
       )}
       {step === 3 && (

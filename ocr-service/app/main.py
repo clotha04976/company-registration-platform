@@ -19,7 +19,7 @@ ALLOWED_EXTENSIONS = {"pdf", "jpg", "jpeg", "png"}
 app = FastAPI(title="公司登記身分證 OCR", version="0.1.0")
 origins = [origin.strip() for origin in os.getenv(
     "OCR_ALLOWED_ORIGINS",
-    "http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173",
+    "http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173,http://localhost:5566,http://127.0.0.1:5566",
 ).split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,

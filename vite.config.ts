@@ -3,27 +3,20 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 
+import { nodeService } from "./build/node-service-plugin";
 import { pythonServices, type PythonService } from "./build/python-services-plugin";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 
-// The case API and the identity OCR service run as local FastAPI processes.
-const CASE_API_URL = process.env.CASE_API_URL ?? "http://127.0.0.1:8690";
+// The ERP API is the local Node.js + SQLite service. Python is reserved for OCR.
+const CASE_API_URL = process.env.CASE_API_URL ?? "http://127.0.0.1:5566";
 const LOCAL_OCR_URL = "http://127.0.0.1:8689";
 // Identity recognition is meant to move to the DuckyOCR workstation. Whenever it
 // points anywhere but the local fallback, there is nothing for us to launch.
 const IDENTITY_OCR_URL = process.env.VITE_IDENTITY_OCR_URL ?? LOCAL_OCR_URL;
 
 const caseApi = new URL(CASE_API_URL);
-const services: PythonService[] = [
-  {
-    name: "case-api",
-    directory: path.join(root, "api-service"),
-    host: caseApi.hostname,
-    port: Number(caseApi.port || 80),
-    setupHint: "api-service\\run-api-service.bat",
-  },
-];
+const services: PythonService[] = [];
 
 if (IDENTITY_OCR_URL === LOCAL_OCR_URL) {
   const ocr = new URL(LOCAL_OCR_URL);
@@ -39,7 +32,16 @@ if (IDENTITY_OCR_URL === LOCAL_OCR_URL) {
 }
 
 export default defineConfig({
-  plugins: [react(), pythonServices(services)],
+  plugins: [
+    react(),
+    nodeService({
+      name: "erp-api",
+      entry: path.join(root, "server.mjs"),
+      host: caseApi.hostname,
+      port: Number(caseApi.port || 80),
+    }),
+    pythonServices(services),
+  ],
   server: {
     port: 5173,
     proxy: {

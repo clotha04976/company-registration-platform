@@ -49,8 +49,8 @@ next-env.d.ts
 **/.pytest_cache/
 /ocr-service/.venv/
 /ocr-service/models/
-/api-service/.venv/
-/api-service/data/
+/data/
+/backups/
 
 # Real identity-card scans used for manual OCR checks; personal data must not
 # be pushed, and 76 MB of images would bloat the repository.

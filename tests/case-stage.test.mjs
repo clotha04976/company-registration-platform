@@ -2,24 +2,25 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-// Behavioural coverage for these rules lives in api-service/tests/test_cases.py.
-// This guards the SQL and the stage transitions the dashboard depends on.
-test("case API validates bodies, returns 404, and reports stage metadata", async () => {
-  const source = await readFile(
-    new URL("../api-service/app/cases.py", import.meta.url),
-    "utf8",
+test("Node ERP owns the complete case workflow and case-scoped preparation", async () => {
+  const [server, dashboard, page] = await Promise.all([
+    readFile(new URL("../server.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../app/cases-dashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+  ]);
+
+  for (const status of ["準備中", "待補資料", "已送件", "審查中", "補件", "核准", "國稅局辦理", "結案"])
+    assert.match(`${server}\n${dashboard}`, new RegExp(status));
+
+  assert.match(server, /preparationMatch = url\.pathname\.match/);
+  assert.match(server, /CREATE TABLE IF NOT EXISTS case_preparation/);
+  assert.match(server, /CREATE TABLE IF NOT EXISTS case_events/);
+  assert.match(server, /CREATE TABLE IF NOT EXISTS billing_items/);
+  assert.match(page, /\/preparation/);
+  assert.match(page, /原始身分證圖片不會寫入資料庫/);
+  const preparationRoute = server.slice(
+    server.indexOf("const preparationMatch"),
+    server.indexOf("const approvalsMatch"),
   );
-  // Python splits long SQL across adjacent literals; join them before matching.
-  const api = source.replace(/"\s*\n\s*"/g, "");
-  assert.match(api, /SELECT stage, status FROM cases WHERE id = \?/);
-  assert.match(api, /HTTPException\(404, "找不到案件。"\)/);
-  assert.match(api, /parse_case_id\(raw_id, "案件編號無效。"\)/);
-  assert.match(api, /HTTPException\(400, message\)/);
-  assert.match(api, /advance_after_precheck/);
-  assert.match(api, /stage == "name_precheck" and status == "ongoing"/);
-  assert.match(api, /status = 'ongoing' AND stage = 'name_precheck'/);
-  assert.match(api, /stage == "city_government" and status == "ongoing"/);
-  assert.match(api, /after_stage == "city_government"/);
-  assert.match(api, /UPDATE cases SET status = 'ongoing', stage = \?, progress = \?, /);
-  assert.match(api, /completed_at = NULL, updated_at = \? WHERE id = \?/);
+  assert.doesNotMatch(preparationRoute, /formData|file_bytes|identity_image|BLOB/i);
 });

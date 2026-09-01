@@ -12,8 +12,7 @@ const eslintConfig = defineConfig([
     "tmp/**",
     "public/**",
     ".private/**",
-    // Python services ship their own JavaScript inside virtualenvs.
-    "api-service/**",
+    // The Python OCR service ships JavaScript dependencies inside its virtualenv.
     "ocr-service/**",
   ]),
   js.configs.recommended,
